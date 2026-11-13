@@ -60,6 +60,12 @@ pub trait SampleBuilderTrait {
     fn attachment<T: Into<OptionZBytes>>(self, attachment: T) -> Self;
 }
 
+// LOCAL PATCH: implemented by the query, querier, publisher and sample builders, all behind
+// feature gates, and re-exported from `zenoh::internal::traits`. Dead under default features,
+// which is a hard error wherever this fork is built with warnings denied. Not cfg'd, because
+// the gate would have to match that re-export's and a mismatch breaks a build the
+// default-feature build cannot catch.
+#[allow(dead_code)]
 pub trait TimestampInstrumentationBuilderTrait {
     /// Sets the timestamp stack instrumentation to be sent along with the publication.
     ///

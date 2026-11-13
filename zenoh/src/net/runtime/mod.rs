@@ -62,8 +62,15 @@ use zenoh_protocol::{
 use zenoh_result::{bail, ZResult};
 use zenoh_runtime::ZRuntime;
 #[cfg(feature = "shared-memory")]
+use zenoh_shm::api::client_storage::ShmClientStorage;
+// LOCAL PATCH: these two are used only by `ShmProviderState` and `get_shm_provider`, and
+// every one of those items carries BOTH `#[cfg(feature = "shared-memory")]` AND
+// `#[zenoh_macros::unstable]`. Imported under `shared-memory` alone they are dead whenever
+// `unstable` is off -- which is the configuration this fork's consumer builds
+// (`default-features = false, features = ["transport_tcp", "shared-memory"]`), so with
+// warnings denied the crate did not compile for it at all.
+#[cfg(all(feature = "shared-memory", feature = "unstable"))]
 use zenoh_shm::api::{
-    client_storage::ShmClientStorage,
     protocol_implementations::posix::posix_shm_provider_backend::PosixShmProviderBackend,
     provider::shm_provider::ShmProvider,
 };
@@ -880,10 +887,17 @@ impl fmt::Debug for Runtime {
 pub struct DynamicRuntime(Arc<dyn IRuntime>);
 
 impl DynamicRuntime {
+    // LOCAL PATCH: used only by callers that are themselves feature-gated -- the query
+    // `runtime` field (unstable) and the reply/queryable builders. Dead under default
+    // features, which is a hard error wherever this fork is built with warnings denied.
+    #[allow(dead_code)]
     pub(crate) fn downgrade(&self) -> WeakDynamicRuntime {
         WeakDynamicRuntime(Arc::downgrade(&self.0))
     }
 
+    // LOCAL PATCH: used only from timestamp-instrumentation paths in api/session.rs, which
+    // are feature-gated. Dead under default features; see `downgrade` above.
+    #[allow(dead_code)]
     pub(crate) fn get_inner(&self) -> Arc<dyn IRuntime> {
         self.0.clone()
     }
@@ -915,9 +929,14 @@ impl StructVersion for DynamicRuntime {
 impl PluginStartArgs for DynamicRuntime {}
 
 #[derive(Clone)]
+// LOCAL PATCH: constructed only by `DynamicRuntime::downgrade`, itself gated. Not exported
+// from lib.rs, so this is internal and dead under default features.
+#[allow(dead_code)]
 pub struct WeakDynamicRuntime(pub(crate) Weak<dyn IRuntime>);
 
 impl WeakDynamicRuntime {
+    // LOCAL PATCH: dead under default features, with `WeakDynamicRuntime` itself.
+    #[allow(dead_code)]
     pub(crate) fn upgrade(&self) -> Option<DynamicRuntime> {
         self.0.upgrade().map(DynamicRuntime)
     }

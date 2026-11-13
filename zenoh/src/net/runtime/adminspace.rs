@@ -62,7 +62,7 @@ use crate::{
     net::{
         primitives::Primitives,
         routing::{dispatcher::tables::Tables, gateway::Resource, hat::Sources},
-        runtime::{region, DynamicRuntime},
+        runtime::region,
     },
     LONG_VERSION,
 };
@@ -129,6 +129,16 @@ impl std::fmt::Debug for AdminSpace {
             .finish()
     }
 }
+
+// LOCAL PATCH: `DynamicRuntime` is used in exactly two places in this file, and each is
+// feature-gated -- `start_plugin` under plugins+runtime_plugins, and the query's `runtime`
+// field under unstable. Importing it unconditionally made it an unused import under default
+// features, which is a hard error wherever this fork is built with warnings denied.
+#[cfg(any(
+    feature = "unstable",
+    all(feature = "plugins", feature = "runtime_plugins")
+))]
+use crate::net::runtime::DynamicRuntime;
 
 impl AdminSpace {
     #[cfg(all(feature = "plugins", feature = "runtime_plugins"))]

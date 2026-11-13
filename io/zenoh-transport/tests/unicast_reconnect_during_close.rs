@@ -20,6 +20,13 @@
 // callback (the routing layer under load) leaves the transport in the manager, alive and with no
 // link, for that long. A new link from the same peer must not be added to it: it would be closed by
 // `delete()` right after its open succeeded.
+// LOCAL PATCH: this file's tests are gated on transport features, none of which is in this
+// crate's defaults (["test", "transport_multilink"]), so a plain `cargo test -p
+// zenoh-transport` compiles its helpers with nothing using them. Those warnings are a hard
+// error wherever this fork is built with warnings denied. See tests/unicast_transport.rs for
+// the full reasoning, including why this is allowed rather than gated.
+#![allow(dead_code, unused_imports)]
+
 use std::{
     any::Any,
     convert::TryFrom,

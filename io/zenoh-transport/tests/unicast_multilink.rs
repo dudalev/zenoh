@@ -11,6 +11,13 @@
 // Contributors:
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
+// LOCAL PATCH: this file is gated `#[cfg(feature = "transport_multilink")]`, which IS one of
+// this crate's defaults -- so unlike its siblings it DOES compile under a plain
+// `cargo test -p zenoh-transport`. The allow is still needed: the shared helpers below are
+// declared per-file and this file uses only some of them. See `unicast_transport.rs` for the
+// full reasoning, including why this is allowed rather than gated.
+#![allow(dead_code, unused_imports)]
+
 #[cfg(feature = "transport_multilink")]
 mod tests {
     use std::{convert::TryFrom, sync::Arc, time::Duration};

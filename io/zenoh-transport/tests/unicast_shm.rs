@@ -11,6 +11,13 @@
 // Contributors:
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
+// LOCAL PATCH: this file is gated `#[cfg(feature = "shared-memory")]`, which is NOT a
+// transport feature and is not one of this crate's defaults, so the file compiles to nothing
+// under a plain `cargo test -p zenoh-transport` while its shared helpers still compile. See
+// `unicast_transport.rs` for the full reasoning, including why this is allowed rather than
+// gated.
+#![allow(dead_code, unused_imports)]
+
 #[cfg(feature = "shared-memory")]
 mod tests {
     use std::{

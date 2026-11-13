@@ -11,6 +11,12 @@
 // Contributors:
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
+// LOCAL PATCH: NO file-level allow here, deliberately, unlike this file's siblings. The whole
+// file is `#![cfg(feature = "transport_tcp")]`, so either it compiles with every test in it
+// using the helpers, or it compiles to nothing at all -- there is no configuration in which
+// its helpers are dead. An allow here would silence nothing and would tell the next reader
+// that something needs silencing.
+
 #![cfg(feature = "transport_tcp")]
 
 use std::{

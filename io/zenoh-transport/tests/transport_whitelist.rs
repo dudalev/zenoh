@@ -11,6 +11,13 @@
 // Contributors:
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
+// LOCAL PATCH: this file's tests are gated on transport features, none of which is in this
+// crate's defaults (["test", "transport_multilink"]), so a plain `cargo test -p
+// zenoh-transport` compiles its helpers with nothing using them. Those warnings are a hard
+// error wherever this fork is built with warnings denied. See tests/unicast_transport.rs for
+// the full reasoning, including why this is allowed rather than gated.
+#![allow(dead_code, unused_imports)]
+
 use std::{any::Any, convert::TryFrom, iter::FromIterator, sync::Arc, time::Duration};
 
 use zenoh_core::ztimeout;

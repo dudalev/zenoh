@@ -11,6 +11,11 @@
 // Contributors:
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
+// LOCAL PATCH: this file is gated `#[cfg(target_family = "unix")]` -- a TARGET condition, not
+// a feature at all, so no feature flag makes its helpers used. See `unicast_transport.rs` for
+// the full reasoning, including why this is allowed rather than gated.
+#![allow(dead_code, unused_imports)]
+
 #[cfg(target_family = "unix")]
 mod tests {
     use std::{
