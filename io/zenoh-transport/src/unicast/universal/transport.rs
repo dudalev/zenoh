@@ -202,8 +202,24 @@ impl TransportUnicastUniversal {
         }
         drop(status_guard);
 
-        // Notify the callback
-        if let Some(callback) = self.callback.get().cloned() {
+        // Notify the callback.
+        //
+        // LOCAL PATCH, on top of upstream PR #2862 (which is otherwise carried verbatim):
+        // the join result is CARRIED to the end of this function instead of being propagated
+        // with `?` here.
+        //
+        // Upstream's `.await?` returns before the `self.delete()` below. Combined with the
+        // same PR marking the transport `Closed` above, that strands it PERMANENTLY: it stays
+        // in the manager, `sync()` refuses every later link from this zid
+        // (TransportStatus::Closed), and nothing will ever delete it, so the peer cannot
+        // reconnect until the process restarts. Before #2862 the same early return left the
+        // transport Alive with no links, which a new link from that peer could revive -- so
+        // the PR turns a recoverable state into an unrecoverable one on this path.
+        //
+        // It takes a failed `spawn_blocking` join: the callback panicking, or the blocking
+        // pool shutting down. Unlikely, and not observed -- the point is that the failure is
+        // permanent and silent when it does happen.
+        let callback_res = if let Some(callback) = self.callback.get().cloned() {
             let associated_link = associated_link.clone();
             tokio::task::spawn_blocking(move || {
                 callback.del_link(link);
@@ -215,8 +231,10 @@ impl TransportUnicastUniversal {
                     ));
                 }
             })
-            .await?;
-        }
+            .await
+        } else {
+            Ok(())
+        };
 
         // Associated link must also be closed. run both close calls, return whichever failed first
         let close_asl = async {
@@ -230,6 +248,11 @@ impl TransportUnicastUniversal {
         if is_last {
             self.delete().await?;
         }
+
+        // Only now, with the transport out of the manager, is a callback-join failure
+        // reported. See the LOCAL PATCH note above del_link's callback block.
+        callback_res?;
+
         close_stl_res.and(close_asl_res)
     }
 
