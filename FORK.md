@@ -93,22 +93,31 @@ in this fork's changes reaches it" (as this said) is not true.
 
 | command | runs | result |
 |---|---|---|
-| `cargo test` (plain) | 3 | **2 green** at 880 passed / 0 failed / 54 ignored; 1 red |
+| `cargo test` (plain) | **6**, two campaigns | **4 green** at 880 passed / 0 failed / 54 ignored; 2 red |
 | the full-feature command above | 1 | green, 152 binaries, 977 passed / 0 failed / 79 ignored |
 | `--no-default-features -F transport_tcp,shared-memory` (the consumer's set) | 1 | builds clean |
 
-The red plain run failed ONE test, `transport_unicast_tls_only_mutual_success`, on a 60 s
-`Elapsed` timeout under suite load. It is unrelated to anything this fork changes: TLS is not
-a transport the consumer uses. It is the third member of a class -- a timing-flaky test for a
-transport we do not ship -- after the unixsock and zenoh-ext cases already gated, and the
-class is tracked rather than papered over, because ~50 of the 70 tests in
-`io/zenoh-transport/tests/unicast_transport.rs` exercise transports the consumer never
-builds.
+Each red run failed exactly ONE test, and a DIFFERENT one each time:
 
-**So the plain suite is not reliably green, and saying so is the point.** An earlier version
-of this paragraph read "The suite passes" and gave a single run's figures as a property. One
-run cannot distinguish a green suite from a lucky one -- which is the same argument this fork
-uses to gate `regions`, applied to the suite that remains.
+* `transport_unicast_tls_only_mutual_success` -- a 60 s `Elapsed` under suite load. TLS is not
+  a transport the consumer uses.
+* `test_liveliness_regression_3` -- `liveliness.rs:3889`, `assertion failed:
+  sub.try_recv().unwrap().is_none()`, a timing-dependent ABSENCE assertion. `liveliness` has
+  zero uses in the consumer.
+
+Neither is related to anything this fork changes, and they are the third and fourth members of
+one class: a flaky upstream test for a feature we do not ship. The first two (unixsock, and a
+port-collision race in zenoh-ext) are gated; these two are not, deliberately, because gating
+each one as it appears treats the instance and not the class -- and the class is large. Of the
+70 tests in `io/zenoh-transport/tests/unicast_transport.rs` only 6 exercise TCP; the rest
+cover quic, udp, tls, ws and unix transports the consumer never builds.
+
+**So the plain suite is not reliably green, and saying so is the point.** Four green in six
+is the measurement; a single run is not. One run cannot distinguish a green suite from a lucky
+one -- which is the same argument this fork uses to gate `regions`, applied to the suite that
+remains. Read a red plain run by checking WHICH test failed before concluding anything: if it
+is a non-TCP transport or another feature the consumer does not build, it is this class and
+not a regression.
 
 Vanilla 1.10.2 fails ~104 of its own tests here. Of those, 103 are now gated or `#[ignore]`d
 with their reason and exactly ONE was made to pass -- and both of its faults were that test's
