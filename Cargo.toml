@@ -77,7 +77,10 @@ categories = ["network-programming"]
 description = "Zenoh: The Zero Overhead Pub/Sub/Query Protocol."
 edition = "2021"
 homepage = "http://zenoh.io"
-license = "EPL-2.0 OR Apache-2.0"
+# This FORK is AGPL-3.0-only; see FORK.md. Upstream zenoh is "EPL-2.0 OR Apache-2.0",
+# and this fork is taken under the Apache-2.0 option. Every member crate inherits this
+# field via `license = { workspace = true }`.
+license = "AGPL-3.0-only"
 repository = "https://github.com/eclipse-zenoh/zenoh"
 rust-version = "1.75.0"
 version = "1.10.2"
