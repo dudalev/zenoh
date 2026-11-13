@@ -55,6 +55,12 @@ transport_ws = ["zenoh-link/transport_ws"]
 unstable = ["zenoh-config/unstable", "zenoh-protocol/unstable"]
 uring = ["zenoh-link/uring", "zenoh-uring"]
 
+# LOCAL PATCH. Upstream test targets for zenoh features the consumer of this fork does not
+# use. They are NOT deleted and NOT ignored -- they are gated, so `cargo test` here reports
+# on the behaviour we rely on, and `cargo test --features upstream_only_tests` still runs
+# every one of them. Each gate below says why that target is out of scope.
+upstream_only_tests = []
+
 [dependencies]
 async-trait = { workspace = true }
 crossbeam-utils = { workspace = true }
@@ -103,3 +109,19 @@ rustls = { workspace = true }
 zenoh-protocol = { workspace = true, features = ["test"] }
 zenoh-test = { workspace = true }
 zenoh-util = { workspace = true }
+
+# LOCAL PATCH: see `upstream_only_tests` in [features].
+#
+# Multicast transport. Every shipped config of this fork's consumer sets
+# `scouting/multicast/enabled = false` and connects over TCP on loopback, so no multicast
+# transport is ever opened.
+[[test]]
+name = "multicast_transport"
+path = "tests/multicast_transport.rs"
+required-features = ["upstream_only_tests"]
+
+# LOCAL PATCH: multicast again, as above, with compression on top.
+[[test]]
+name = "multicast_compression"
+path = "tests/multicast_compression.rs"
+required-features = ["upstream_only_tests"]

@@ -279,6 +279,7 @@ async fn zenoh_session_unicast() {
     test_context.close().await;
 }
 
+#[ignore = "LOCAL PATCH: multicast is unused by this fork's consumer -- every shipped config sets scouting/multicast/enabled=false and connects over TCP. Run with --include-ignored."]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn zenoh_session_multicast() {
     zenoh::init_log_from_env_or("error");
