@@ -796,6 +796,15 @@ impl Primitives for Face {
             } else if let [last_owner] = &mut *remaining {
                 last_owner.unpropagate_last_non_owned_subscriber(ctx.reborrow(), res.clone())
             }
+
+            // The closing face's own context on this resource is never useful again, whoever
+            // else still subscribes to it -- and `FaceContext` owns an `Arc<FaceState>`, so
+            // leaving it keeps the dead face's whole state alive. Before this, only the
+            // "nobody else has it" branch above removed the context, so whenever another
+            // region still had one the context stayed: measured at 185 retained contexts in
+            // a single run of tests/regions. A second remove is a no-op, so the branch above
+            // is unaffected.
+            get_mut_unchecked(&mut res).face_ctxs.remove(&src_fid);
         }
 
         for mut res in removed_queryables {
@@ -830,6 +839,15 @@ impl Primitives for Face {
                     }
                 }
             }
+
+            // The closing face's own context on this resource is never useful again, whoever
+            // else still subscribes to it -- and `FaceContext` owns an `Arc<FaceState>`, so
+            // leaving it keeps the dead face's whole state alive. Before this, only the
+            // "nobody else has it" branch above removed the context, so whenever another
+            // region still had one the context stayed: measured at 185 retained contexts in
+            // a single run of tests/regions. A second remove is a no-op, so the branch above
+            // is unaffected.
+            get_mut_unchecked(&mut res).face_ctxs.remove(&src_fid);
         }
 
         for mut res in removed_tokens {
@@ -847,6 +865,15 @@ impl Primitives for Face {
             } else if let [last_owner] = &mut *remaining {
                 last_owner.unpropagate_last_non_owned_token(ctx.reborrow(), res.clone())
             }
+
+            // The closing face's own context on this resource is never useful again, whoever
+            // else still subscribes to it -- and `FaceContext` owns an `Arc<FaceState>`, so
+            // leaving it keeps the dead face's whole state alive. Before this, only the
+            // "nobody else has it" branch above removed the context, so whenever another
+            // region still had one the context stayed: measured at 185 retained contexts in
+            // a single run of tests/regions. A second remove is a no-op, so the branch above
+            // is unaffected.
+            get_mut_unchecked(&mut res).face_ctxs.remove(&src_fid);
         }
 
         for res in get_mut_unchecked(ctx.src_face).remote_mappings.values_mut() {
@@ -869,6 +896,51 @@ impl Primitives for Face {
         get_mut_unchecked(ctx.src_face).local_interests.clear();
 
         hats[region].close_face(ctx);
+
+        // Remove the closing face's context from EVERY resource that still holds one.
+        //
+        // `FaceContext` owns an `Arc<FaceState>`, so every context left on a resource pins
+        // the whole dead face for as long as that resource lives -- and a resource another
+        // subscriber holds lives for the session.
+        //
+        // The targeted removals above do not cover every case, and two attempts to enumerate
+        // the cases were wrong, so the invariant is established by construction here instead:
+        // after this point no resource holds a context for a face that is going away,
+        // whatever route created that context.
+        //
+        // What the targeted removals miss is any resource for an entity that was undeclared
+        // BEFORE the face closed, so the hat no longer reports it and it is not in the
+        // face's key-expression mappings either. A wildcard subscription is one way to get
+        // there -- the subscription's resource is `a/**` while the mapping is for its
+        // non-wild prefix `a` -- but it is not the only one: the leak was also observed on
+        // the plain key `test/session`.
+        //
+        // There is deliberately NO assertion after this sweep. A walk that checked for
+        // leftovers would run after the sweep had removed them and so could never fire; an
+        // earlier version of this code did exactly that and the check was worthless. The
+        // property is structural, not asserted.
+        //
+        // The walk is affordable precisely here: a face closes when a session goes away,
+        // never on a per-message path. It is iterative because zenoh's own tree walks avoid
+        // recursion -- `Resource::make_resource` says so in as many words, "the tree may have
+        // arbitrary depth" -- and a recursive sweep would inherit a stack-depth limit that
+        // the key space, not this code, decides.
+        {
+            let mut stack: Vec<Arc<Resource>> = vec![tables.data.root_res.clone()];
+            let mut holders: Vec<Arc<Resource>> = Vec::new();
+            while let Some(res) = stack.pop() {
+                if res.face_ctxs.contains_key(&src_fid) {
+                    holders.push(res.clone());
+                }
+                for child in res.children.iter() {
+                    // `Child` derefs to `Arc<Resource>`; its field is private here.
+                    stack.push(Arc::clone(child));
+                }
+            }
+            for mut res in holders {
+                get_mut_unchecked(&mut res).face_ctxs.remove(&src_fid);
+            }
+        }
 
         tables.data.faces.remove(&src_fid);
 
