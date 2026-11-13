@@ -10,7 +10,11 @@ branched at tag `1.10.2` (commit `cc839802`).
 **Apache License 2.0** option, which permits redistribution of the work and of derivative
 works under different terms, provided the conditions in its section 4 are met. Accordingly:
 
-* **This fork, and every modification made in it, is licensed `AGPL-3.0-only`.**
+* **This fork, and every modification made in it, is licensed `AGPL-3.0-only`.** The
+  workspace manifest carries `license = "AGPL-3.0-only"`, and `cargo metadata --no-deps`
+  reports 42 workspace members: 39 inherit that field, and three declare no licence at all
+  (`zenoh-test`, `zenoh-backend-example`, `zenoh-plugin-example`), as they do upstream.
+  Re-derive those counts rather than trusting them here.
 * **Upstream's licence text and notice are retained unmodified** as [`LICENSE`](LICENSE) and
   [`NOTICE.md`](NOTICE.md). They state the terms the original work is available under; they
   are not this fork's terms.
@@ -23,14 +27,34 @@ taken from upstream remains available from upstream under its own dual licence.
 
 ## What this fork changes
 
-Each item is one commit, and its message carries the reasoning and the measurements.
+**The authoritative list is `git log cc839802..HEAD`**, and each commit message carries the
+reasoning and the measurements. This section gives the THEMES only, deliberately: a table of
+commits in a file nobody updates goes stale, and an earlier version of this one listed four
+rows while the fork carried fourteen commits -- including rows for changes that did not exist
+yet at the commit that introduced the table.
 
-| change | why |
-|---|---|
-| this notice, and `license = "AGPL-3.0-only"` in the workspace manifest | the whole fork is AGPL-3.0-only; every member crate inherits the field with `license = { workspace = true }` |
-| `api/session.rs`: never reuse an expression id a live declaration still holds | upstream issue [#2860](https://github.com/eclipse-zenoh/zenoh/issues/2860) -- the `u16` id counter wraps and re-issues ids that live declarations still hold, which misroutes one publication per collision and then silently drops every later one on the affected declaration |
-| `rust-toolchain.toml`: 1.99.1 | upstream pins 1.97.1; the workspace MSRV is unchanged at 1.75.0 |
-| `zenoh/tests/expr_id_rollover.rs`, `zenoh/tests/keyexpr_desync_*` | regression gates for the above, so a later rebase cannot lose the fix quietly. They assert on what ARRIVED rather than on zenoh's log text, so rewording a diagnostic does not break them |
+* **The defect this fork exists for.** `api/session.rs` never reuses an expression id a live
+  declaration still holds -- upstream issue
+  [#2860](https://github.com/eclipse-zenoh/zenoh/issues/2860). The `u16` id counter wraps and
+  re-issues ids that live declarations still hold, which misroutes one publication per
+  collision and then silently drops every later one on the affected declaration.
+* **Three further routing defects found while building the gate for it**, each root-caused
+  rather than guarded: a resource left in a router hat's set without its context, the runtime
+  stripping the resource tree while hats still held `Arc<Resource>`, and a closing face
+  leaving its context on resources that outlive it.
+* **One upstream fix carried**, [#2862](https://github.com/eclipse-zenoh/zenoh/pull/2862),
+  under two criteria: it has a test that fails here, and it is reachable by what we run. That
+  PR is OPEN and unreviewed upstream -- it is not accepted code.
+* **The regression gates**, `zenoh/tests/expr_id_rollover.rs` and
+  `zenoh/tests/keyexpr_desync_*`. They assert on what ARRIVED, not on zenoh's log text, so
+  rewording a diagnostic cannot blind them.
+* **Test-suite scope.** Upstream targets exercising features this fork's consumer does not use
+  are gated behind `upstream_only_tests`, and a few single tests are `#[ignore]`d with their
+  reason. Nothing is deleted.
+* **`rust-toolchain.toml`: 1.100** (upstream pins 1.97.1). The fork's own MSRV declaration is
+  unchanged at `rust-version = "1.75.0"`, which is upstream's claim and what the non-member
+  `ci/zenoh-1-75` crate exists to test; nothing builds this fork on anything but the pinned
+  toolchain.
 
 ## Building and testing this fork
 
@@ -49,23 +73,54 @@ fork's build output into the parent project's own target directory, and that dir
 one its production binaries are built in. Set it somewhere else, and outside any replicated
 tree -- a debug build of this workspace is tens of gigabytes.
 
-**The feature flags.** `cargo build -p zenoh` with DEFAULT features leaves five items unused
-(`DynamicRuntime`, `WeakDynamicRuntime`, `TimestampInstrumentationBuilderTrait`, and two of
-their methods), so it warns. That is upstream's, not ours -- it is feature-dependent dead
-code, present at tag 1.10.2 -- but the carrying project sets `build.warnings = "deny"`, which
-turns those warnings into a failed build. With the flags above the items are used and the
-build is clean.
+**The feature flags.** They are not required any more, and the reason is worth keeping. A
+DEFAULT-feature `cargo build -p zenoh` used to emit five warnings, over six items
+(`DynamicRuntime`, `WeakDynamicRuntime`, `TimestampInstrumentationBuilderTrait`, and three
+methods) that are feature-dependent dead code present at tag 1.10.2. The carrying project
+sets `build.warnings = "deny"`, so those warnings failed the build outright. Each is now
+either gated to exactly its users' condition or allowed with a comment naming which feature
+uses it, so every configuration builds clean -- including the one the consumer actually uses,
+`--no-default-features --features transport_tcp,shared-memory`, which did NOT build until a
+dead import was gated: every verification run before that had `unstable` on.
 
 **`--exclude zenoh-uring`.** Its `reader` stress test does not terminate: measured at roughly
-1500% CPU for 8 m 54 s with 3 of its 18 tests finished, and killed by hand. Nothing in this
-fork's changes reaches that crate.
+1500% CPU for 8 m 54 s with 3 of its 18 tests finished, and killed by hand. No CODE of ours
+reaches that crate -- but this fork does edit its manifest, to gate that target, so "nothing
+in this fork's changes reaches it" (as this said) is not true.
 
-**The suite passes.** Measured 2026-11-13 on rustc 1.99.1: plain `cargo test` is 902 passed /
-0 failed / 48 ignored, and the full-feature command above is 151 binaries, 999 passed, 0
-failed, 73 ignored. Vanilla 1.10.2 fails ~104 of its own tests here; three of those were real
-defects and are fixed, and the rest exercise features this fork's consumer does not use and
-are gated behind `upstream_only_tests` -- see the table below. So a red run now means
-something, which is the whole point of carrying the fork.
+**What the suite does, with the number of runs beside it.** Measured 2026-11-14 on
+`rustc 1.100.0 (0ef1bc386)`:
+
+| command | runs | result |
+|---|---|---|
+| `cargo test` (plain) | 3 | **2 green** at 880 passed / 0 failed / 54 ignored; 1 red |
+| the full-feature command above | 1 | green, 152 binaries, 977 passed / 0 failed / 79 ignored |
+| `--no-default-features -F transport_tcp,shared-memory` (the consumer's set) | 1 | builds clean |
+
+The red plain run failed ONE test, `transport_unicast_tls_only_mutual_success`, on a 60 s
+`Elapsed` timeout under suite load. It is unrelated to anything this fork changes: TLS is not
+a transport the consumer uses. It is the third member of a class -- a timing-flaky test for a
+transport we do not ship -- after the unixsock and zenoh-ext cases already gated, and the
+class is tracked rather than papered over, because ~50 of the 70 tests in
+`io/zenoh-transport/tests/unicast_transport.rs` exercise transports the consumer never
+builds.
+
+**So the plain suite is not reliably green, and saying so is the point.** An earlier version
+of this paragraph read "The suite passes" and gave a single run's figures as a property. One
+run cannot distinguish a green suite from a lucky one -- which is the same argument this fork
+uses to gate `regions`, applied to the suite that remains.
+
+Vanilla 1.10.2 fails ~104 of its own tests here. Of those, 103 are now gated or `#[ignore]`d
+with their reason and exactly ONE was made to pass -- and both of its faults were that test's
+own environment assumptions. The three real routing defects this fork fixes were found by
+other means and are fixed in their own commits; they are not part of that 104.
+
+**The shared-memory targets run but cannot pass on a memory-capped host.** `zenoh/tests/shm.rs`
+reports 10 tests, where before the feature reached the crate at all it reported `running 0
+tests`. 5 pass; the rest fail or hang downstream of one line --
+`Unable to create POSIX shm segment: OS error 12` (ENOMEM) -- because shm pages are charged to
+the cgroup the test runs in, not because `/dev/shm` is full (30 GB free when measured). Run
+them without a memory cap, or treat them as unverifiable on that host and say which.
 
 Run everything, including the gated targets, with:
 
@@ -76,6 +131,7 @@ CARGO_TARGET_DIR=/path/outside/the/synced/tree \
   --workspace --no-fail-fast
 ```
 
-That is expected to fail: it includes upstream's `regions` scenarios, whose failures are
-timeouts whose count moves run to run, and `zenoh-uring`'s `reader`, which does not
-terminate.
+That is expected to HANG, not to fail, and the difference matters if you run it: it drops
+`--exclude zenoh-uring`, so it includes that crate's `reader` target, which does not
+terminate and has to be killed by hand. It also includes upstream's `regions` scenarios,
+whose failures are timeouts whose count moves run to run.
