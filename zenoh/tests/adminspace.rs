@@ -69,16 +69,41 @@ async fn test_adminspace_read() {
         c.adminspace.permissions.set_read(true).unwrap();
         c.adminspace.permissions.set_write(false).unwrap();
         c.plugins_loading.set_enabled(true).unwrap();
-        let plugin_search_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        // LOCAL PATCH: derive the plugin directory from this test binary, not from
+        // `<CARGO_MANIFEST_DIR>/../target/debug`.
+        //
+        // That hardcoded path is only correct when the target directory is the default. With
+        // CARGO_TARGET_DIR set anywhere else -- which it is whenever this fork is built from
+        // inside another project -- the directory does not exist, the required `rest` plugin
+        // below is not found, and the loader panics with "Library file
+        // 'libzenoh_plugin_rest.so' not found".
+        //
+        // The running test binary is at <target>/<profile>/deps/, and cargo builds the
+        // plugin's cdylib beside it; it is also uplifted to <target>/<profile>/ in some
+        // layouts, so both are searched.
+        let deps_dir = std::env::current_exe()
+            .expect("current_exe")
             .parent()
-            .unwrap()
-            .join("target/debug");
+            .expect("test binary has a parent directory")
+            .to_path_buf();
+        let profile_dir = deps_dir
+            .parent()
+            .expect("deps directory has a parent")
+            .to_path_buf();
         c.plugins_loading
-            .set_search_dirs(zenoh_util::LibSearchDirs::from_paths(&[plugin_search_dir
-                .to_str()
-                .unwrap()]))
+            .set_search_dirs(zenoh_util::LibSearchDirs::from_paths(&[
+                deps_dir.to_str().unwrap(),
+                profile_dir.to_str().unwrap(),
+            ]))
             .unwrap();
-        c.insert_json5("plugins/rest/http_port", "\"8080\"")
+        // LOCAL PATCH: port 0, not a hardcoded 8080.
+        //
+        // This test never makes an HTTP request -- it reads the adminspace through the zenoh
+        // session below -- so the REST plugin only has to START. A fixed port made that
+        // impossible whenever anything else held 8080, including a second copy of this very
+        // suite: the plugin then failed with "Address already in use (os error 98)" and the
+        // loader panicked, because the plugin is marked required. Port 0 lets the OS pick.
+        c.insert_json5("plugins/rest/http_port", "\"0\"")
             .unwrap();
         c.insert_json5("plugins/rest/__required__", "true").unwrap();
         let s = ztimeout!(zenoh::open(c)).unwrap();
