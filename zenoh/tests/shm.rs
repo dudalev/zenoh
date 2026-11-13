@@ -303,7 +303,31 @@ async fn zenoh_shm_unicast_implicit_optimization() {
             .wait()
             .unwrap();
 
+        // LOCAL PATCH: bound this wait, and say WHY it failed.
+        //
+        // Upstream spins here with no timeout at all -- the only unbounded wait in this
+        // file; every other one goes through `ztimeout!`. If SHM can never engage, so that
+        // no sample ever arrives with an SHM payload, `shm_works` never becomes true and
+        // this loop runs for ever at ten puts a second. libtest then prints only "has been
+        // running for over 60 seconds" and the run hangs until something outside kills it.
+        //
+        // Measured: with a POSIX shm segment that cannot be allocated ("Unable to create
+        // POSIX shm segment: OS error 12", i.e. ENOMEM, which a cgroup memory cap is enough
+        // to cause) this test hung for 29 minutes while its siblings failed in 60 seconds.
+        //
+        // A bare `ztimeout!` would bound it but panic with `Elapsed(())`, which names
+        // nothing -- that is what the sibling failures look like. This names what was not
+        // achieved and where to look for the cause.
+        let shm_deadline = std::time::Instant::now() + TIMEOUT;
         while !shm_works.load(Ordering::Relaxed) {
+            assert!(
+                std::time::Instant::now() < shm_deadline,
+                "implicit SHM never engaged within {TIMEOUT:?}: no sample arrived carrying \
+                 an SHM payload. The provider most likely failed to initialise -- look for \
+                 \"Error creating lazy ShmProvider\" earlier in this run. OS error 12 there \
+                 is ENOMEM, meaning the shm segment could not be allocated on this host, \
+                 not that zenoh is broken."
+            );
             peer02.put(key, "test").wait().unwrap();
             // Wait for implicit SHM to init
             tokio::time::sleep(Duration::from_millis(100)).await;
