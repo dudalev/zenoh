@@ -146,6 +146,8 @@ pub struct FaceState {
     pub(crate) local_mappings: IntHashMap<ExprId, Arc<Resource>>,
     pub(crate) remote_mappings: IntHashMap<ExprId, Arc<Resource>>,
     pub(crate) next_qid: RequestId,
+    /// Where [`FaceState::next_free_local_id`] resumes its search. Never 0.
+    pub(crate) next_local_id: ExprId,
     /// Pending queries sent to this face.
     ///
     /// # Safety
@@ -187,6 +189,7 @@ impl FaceStateBuilder {
             local_mappings: IntHashMap::new(),
             remote_mappings: IntHashMap::new(),
             next_qid: 0,
+            next_local_id: 1,
             pending_queries: HashMap::new(),
             mcast_group: None,
             in_interceptors: None,
@@ -262,12 +265,36 @@ impl FaceState {
         }
     }
 
-    pub(crate) fn get_next_local_id(&self) -> ExprId {
-        let mut id = 1;
-        while self.local_mappings.contains_key(&id) || self.remote_mappings.contains_key(&id) {
-            id += 1;
+    /// Returns an expression id this face may declare, or `None` if every id is taken.
+    ///
+    /// `ExprId` is a `u16` and 0 is `EMPTY_EXPR_ID`, the reserved "no resource" scope, so the
+    /// usable space is `1..=u16::MAX`. An id is unusable while either mapping holds it.
+    ///
+    /// Two properties this must keep, both of which the previous version lacked:
+    ///
+    /// * **It cannot run off the end.** The old loop started at 1 and incremented with no
+    ///   bound, so a face holding every id ran past `u16::MAX` -- a panic in a debug build,
+    ///   and in a release build a wrap to 0, i.e. handing out the reserved scope. The panic
+    ///   fired while the caller held `tables.ctrl_lock`, so it also poisoned that lock and
+    ///   every later router operation failed with it.
+    /// * **The search resumes instead of restarting.** Rescanning from 1 on every call makes
+    ///   one declaration O(n) and a filling space O(n^2); measured, 65,600 live declarations
+    ///   spent minutes here. The cursor makes the common case O(1).
+    ///
+    /// On `None` the caller must send the key expression in full rather than declare it.
+    pub(crate) fn next_free_local_id(&mut self) -> Option<ExprId> {
+        // One sweep of the usable space at most, so a full face ends in None rather than
+        // looping for ever.
+        for _ in 1..=ExprId::MAX {
+            let id = self.next_local_id;
+            // Wrap to 1, never to 0: EMPTY_EXPR_ID must never be handed out.
+            self.next_local_id = if id == ExprId::MAX { 1 } else { id + 1 };
+            if !self.local_mappings.contains_key(&id) && !self.remote_mappings.contains_key(&id)
+            {
+                return Some(id);
+            }
         }
-        id
+        None
     }
 
     pub(crate) fn update_interceptors_caches(&self, res: &mut Arc<Resource>) {

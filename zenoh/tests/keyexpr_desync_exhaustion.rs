@@ -24,20 +24,41 @@
 //! the third probe's publisher holds one of those ids. Establishing it needs the one
 //! combination never run: the UNPATCHED session against the now-patched router.
 //!
-//! # IGNORED, and why: it currently fails inside the ROUTER, before it can assert anything
+//! # It also covers the ROUTER's side of the same fault
 //!
-//! Filling the id space trips a SECOND, unrelated defect. `Face::get_next_local_id`
-//! (`net/routing/dispatcher/face.rs:265`) picks the router's id for a face by scanning from 1
-//! and incrementing, with no bound: once every id is mapped it runs past `u16::MAX`, which
-//! panics in a debug build and in a release build wraps to 0 -- `EMPTY_EXPR_ID`, the reserved
-//! scope. Its linear rescan is also why this test takes minutes rather than seconds.
+//! Filling the id space tripped a second, independent defect, which this test is what found:
+//! the router picked a face's expression id by scanning from 1 and incrementing with no
+//! bound, so a face holding every id ran past `u16::MAX`. Measured 2026-11-13 on BOTH the
+//! patched session and vanilla 1.10.2 -- the same three panic sites (`face.rs:268`, then two
+//! more on the `tables.ctrl_lock` the first panic poisoned while holding it) and the same
+//! exit 101, so it was pre-existing and not a consequence of this file's subject.
 //!
-//! Measured 2026-11-13 on BOTH the patched session and vanilla 1.10.2: the same three panic
-//! sites (`face.rs:268`, then `:567` and `:581` on the control lock the first panic poisoned)
-//! and the same exit 101. So it is pre-existing and this file's subject is not the cause.
+//! Fixed alongside, as `FaceState::next_free_local_id`, which is bounded, resumes its search
+//! instead of restarting, never yields `EMPTY_EXPR_ID`, and returns `None` when the face is
+//! full -- whereupon `Resource::decl_key` sends the key expression in full. So this test now
+//! gates BOTH halves: the session must not reuse a live id, and the router must not either.
 //!
-//! Tracked as BER-1902. **Remove the `#[ignore]` as part of fixing that**: this test is the
-//! gate for it, and it will then also cover the branch it was written for.
+//! # It is the slowest test in this crate: ~3 min 43 s, measured 2026-11-13
+//!
+//! That is the cost of 65,600 live declarations and the 65,601st, and it is real work rather
+//! than a defect left behind -- before the fix the same run spent minutes rescanning from id
+//! 1 on every call and then panicked. Kept in the default set rather than ignored, because a
+//! gate that has to be asked for is a gate nobody runs; if the suite's wall time ever has to
+//! come down, this is the first candidate for `#[ignore]`.
+
+// The lint set of the project that carries this fork (its root Cargo.toml,
+// `[workspace.lints]`), applied here as crate attributes rather than through the workspace.
+// Every file under tests/ is its own crate root, so this binds EXACTLY the code we wrote.
+// Opting the upstream crates in would mean 2,451 findings in code we do not own -- about
+// 2,000 of them missing doc comments on zenoh's public API -- and every one of those edits
+// would conflict on the next rebase onto a newer upstream tag.
+#![deny(warnings)]
+#![deny(missing_docs)]
+#![deny(clippy::all)]
+#![deny(clippy::too_many_lines)]
+#![deny(clippy::equatable_if_let)]
+#![deny(clippy::cognitive_complexity)]
+#![deny(clippy::unnested_or_patterns)]
 
 use std::{
     sync::{
@@ -72,8 +93,6 @@ fn live_key(i: usize) -> String {
     format!("{PREFIX}/{}/{}", i / 256, i % 256)
 }
 
-#[ignore = "fails in the router on a separate pre-existing defect, BER-1902; see this file's \
-            header. Run with --include-ignored once that is fixed."]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_declarations_past_the_whole_id_space_still_route() {
     zenoh::init_log_from_env_or("error");
@@ -109,13 +128,11 @@ async fn test_declarations_past_the_whole_id_space_still_route() {
                 let key = sample.key_expr().as_str().to_owned();
                 let payload = String::from_utf8_lossy(&sample.payload().to_bytes()).into_owned();
                 delivered.fetch_add(1, Ordering::SeqCst);
-                if payload != key {
-                    if wrong_key.fetch_add(1, Ordering::SeqCst) < 8 {
-                        detail
-                            .lock()
-                            .unwrap()
-                            .push(format!("arrived on {key} but was put on {payload}"));
-                    }
+                if payload != key && wrong_key.fetch_add(1, Ordering::SeqCst) < 8 {
+                    detail
+                        .lock()
+                        .unwrap()
+                        .push(format!("arrived on {key} but was put on {payload}"));
                 }
             }))
         .unwrap()

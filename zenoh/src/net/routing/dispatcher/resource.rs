@@ -691,11 +691,17 @@ impl Resource {
                             .unwrap_or(true)
                     })
                 {
+                    // Drawn BEFORE the context is created: if no id is free there is nothing
+                    // to declare, and the key expression goes out in full -- the same thing
+                    // this function does below when the face has not asked for this prefix.
+                    // Creating the context first would leave an empty one behind.
+                    let Some(expr_id) = get_mut_unchecked(face).next_free_local_id() else {
+                        return res.expr().to_string().into();
+                    };
                     let ctx = get_mut_unchecked(&mut nonwild_prefix)
                         .face_ctxs
                         .entry(face.id)
                         .or_insert_with(|| Arc::new(FaceContext::new(face.clone())));
-                    let expr_id = face.get_next_local_id();
                     get_mut_unchecked(ctx).local_expr_id = Some(expr_id);
                     get_mut_unchecked(face)
                         .local_mappings
