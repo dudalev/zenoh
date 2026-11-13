@@ -11,7 +11,7 @@
 // Contributors:
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
-use std::{env, error::Error, fmt::Display, path::PathBuf, str::FromStr};
+use std::{env, error::Error, fmt::Display, path::PathBuf};
 
 use serde::{
     de::{value::MapAccessDeserializer, Visitor},
@@ -158,8 +158,13 @@ impl LibSearchSpec {
                 let expanded =
                     shellexpand::full(value).map_err(|err| error_from_source(&self, err))?;
 
-                let path =
-                    PathBuf::from_str(&expanded).map_err(|err| error_from_source(&self, err))?;
+                // LOCAL PATCH: `PathBuf::from_str` is infallible -- its error type is
+                // `Infallible` -- so the `map_err` closure, and the `error_from_source` call
+                // inside it, can never run. rustc 1.100's `unreachable_code` lint reports
+                // exactly that, and under denied warnings it fails the build. Constructing
+                // the PathBuf directly removes the dead error path rather than silencing the
+                // lint.
+                let path = PathBuf::from(&*expanded);
 
                 Ok(path)
             }
