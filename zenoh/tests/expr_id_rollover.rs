@@ -13,6 +13,20 @@
 //! per-message publisher then deleted the kept publisher's mapping, so every later `put` on it
 //! returned `Ok` and was dropped inside the session.
 
+// The lint set of the project that carries this fork (its root Cargo.toml,
+// `[workspace.lints]`), applied here as crate attributes rather than through the workspace.
+// Every file under tests/ is its own crate root, so this binds EXACTLY the code we wrote.
+// Opting the upstream crates in would mean 2,451 findings in code we do not own -- about
+// 2,000 of them missing doc comments on zenoh's public API -- and every one of those edits
+// would conflict on the next rebase onto a newer upstream tag.
+#![deny(warnings)]
+#![deny(missing_docs)]
+#![deny(clippy::all)]
+#![deny(clippy::too_many_lines)]
+#![deny(clippy::equatable_if_let)]
+#![deny(clippy::cognitive_complexity)]
+#![deny(clippy::unnested_or_patterns)]
+
 use std::{
     sync::{
         atomic::{AtomicUsize, Ordering},

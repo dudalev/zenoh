@@ -31,3 +31,35 @@ Each item is one commit, and its message carries the reasoning and the measureme
 | `api/session.rs`: never reuse an expression id a live declaration still holds | upstream issue [#2860](https://github.com/eclipse-zenoh/zenoh/issues/2860) -- the `u16` id counter wraps and re-issues ids that live declarations still hold, which misroutes one publication per collision and then silently drops every later one on the affected declaration |
 | `rust-toolchain.toml`: 1.99.1 | upstream pins 1.97.1; the workspace MSRV is unchanged at 1.75.0 |
 | `zenoh/tests/expr_id_rollover.rs`, `zenoh/tests/keyexpr_desync_*` | regression gates for the above, so a later rebase cannot lose the fix quietly. They assert on what ARRIVED rather than on zenoh's log text, so rewording a diagnostic does not break them |
+
+## Building and testing this fork
+
+```bash
+CARGO_TARGET_DIR=/path/outside/the/synced/tree \
+  cargo test -F test -F plugins,unstable,internal \
+  --exclude zenoh-examples --exclude zenoh-plugin-example --exclude zenoh-uring \
+  --workspace --no-fail-fast
+```
+
+Three things about that command are deliberate.
+
+**`CARGO_TARGET_DIR`.** This fork is checked out inside the repository that carries it, so
+that repository's `.cargo/config.toml` applies here: without an override, cargo writes this
+fork's build output into the parent project's own target directory, and that directory is the
+one its production binaries are built in. Set it somewhere else, and outside any replicated
+tree -- a debug build of this workspace is tens of gigabytes.
+
+**The feature flags.** `cargo build -p zenoh` with DEFAULT features leaves five items unused
+(`DynamicRuntime`, `WeakDynamicRuntime`, `TimestampInstrumentationBuilderTrait`, and two of
+their methods), so it warns. That is upstream's, not ours -- it is feature-dependent dead
+code, present at tag 1.10.2 -- but the carrying project sets `build.warnings = "deny"`, which
+turns those warnings into a failed build. With the flags above the items are used and the
+build is clean.
+
+**`--exclude zenoh-uring`.** Its `reader` stress test does not terminate: measured at roughly
+1500% CPU for 8 m 54 s with 3 of its 18 tests finished, and killed by hand. Nothing in this
+fork's changes reaches that crate.
+
+**A non-zero exit from the full suite is expected**, and is not a regression: vanilla 1.10.2
+fails 95 of its own tests, 79 of them timeouts in `tests/regions`. Judge a change by whether
+the set of failing test NAMES grows, not by the exit code.
