@@ -241,6 +241,9 @@ impl Hat {
     ) -> UnregisterFaceEntitiesResult {
         let mut removed_subscribers = HashSet::new();
         for mut res in self.router_subs.iter().cloned().collect_vec() {
+            if !has_resource_context(&res, "subscription") {
+                continue;
+            }
             self.res_hat_mut(&mut res)
                 .router_subs
                 .retain(|router| !removed_routers.contains(router));
@@ -253,6 +256,9 @@ impl Hat {
 
         let mut removed_queryables = HashSet::new();
         for mut res in self.router_qabls.iter().cloned().collect_vec() {
+            if !has_resource_context(&res, "queryable") {
+                continue;
+            }
             self.res_hat_mut(&mut res)
                 .router_qabls
                 .retain(|router, _| !removed_routers.contains(router));
@@ -265,6 +271,9 @@ impl Hat {
 
         let mut removed_tokens = HashSet::new();
         for mut res in self.router_tokens.iter().cloned().collect_vec() {
+            if !has_resource_context(&res, "token") {
+                continue;
+            }
             self.res_hat_mut(&mut res)
                 .router_tokens
                 .retain(|router| !removed_routers.contains(router));
@@ -281,6 +290,44 @@ impl Hat {
             removed_tokens,
         }
     }
+}
+
+/// Whether `res` still has a `ResourceContext`, warning if it does not.
+///
+/// It warns on EVERY call, not once per resource: the entry is deliberately kept (see below),
+/// so every later walk finds it again and warns again. Measured: 287 warnings in one
+/// `tests/regions` run. That is intentional -- the alternative is dropping an entry for a
+/// reason nobody has established -- but it means the count is a count of WALKS, not of
+/// distinct resources.
+///
+/// `Hat::res_hat` and `Hat::res_hat_mut` both go through `Resource::context()` /
+/// `context_mut()`, which are `self.ctx.as_{ref,mut}().unwrap()`. zenoh's own comment beside
+/// them says a matched resource is "expected" to have a context and calls the invariant one
+/// "worth checking in debug mode, until we are confident it always holds".
+///
+/// It does not always hold. When a router link closes, `unregister_router_entities` walks the
+/// hat's router-keyed sets and reaches `res_hat_mut` for every entry; a resource whose context
+/// has already been removed panicked there. That panic is raised while the caller holds
+/// `tables.ctrl_lock`, so the damage is not one task: it poisons the router's control lock and
+/// every later operation on it fails with `PoisonError`.
+///
+/// So the walk skips such a resource instead of unwrapping. It is deliberately LOUD rather
+/// than silent -- the resource should not be in the set, and a quiet skip would turn a broken
+/// invariant into invisible behaviour.
+///
+/// It deliberately does NOT remove the resource from the set. Why the context is missing is
+/// not established, so dropping the entry would be a second, unmeasured change on top of the
+/// one that stops the crash.
+fn has_resource_context(res: &Arc<Resource>, kind: &str) -> bool {
+    if res.ctx.is_some() {
+        return true;
+    }
+    tracing::warn!(
+        "router hat holds a {kind} for {} with no resource context; skipping it while \
+         unregistering. This should not happen -- the entry cannot take part in routing.",
+        res.expr()
+    );
+    false
 }
 
 impl HatBaseTrait for Hat {
