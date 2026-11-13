@@ -407,6 +407,12 @@ impl HatBaseTrait for Hat {
         Ok(())
     }
 
+    fn clear_resources(&mut self) {
+        self.router_subs.clear();
+        self.router_qabls.clear();
+        self.router_tokens.clear();
+    }
+
     fn close_face(&mut self, ctx: DispatcherContext) {
         debug_assert!(self.owns(ctx.src_face));
 

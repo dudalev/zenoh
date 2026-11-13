@@ -1320,6 +1320,15 @@ impl Closee for Arc<RuntimeState> {
         // This should be resolved by identifying corresponding task, and placing
         // cancellation token manually inside it.
         let mut tables = self.router.tables.tables.write().unwrap();
+        // The hats keep `Arc<Resource>` sets of their own, which are NOT part of the resource
+        // tree, so `root_res.close()` below does not reach them. Drop those references FIRST,
+        // or shutdown leaves a hat holding resources whose context it has just taken -- and
+        // anything that still drives the hat (a face close or a link-state update already in
+        // flight, since closing only asks tasks to stop) then unwraps that missing context and
+        // panics, poisoning `ctrl_lock` on the way out.
+        for hat in tables.hats.values_mut() {
+            hat.clear_resources();
+        }
         tables.data.root_res.close();
         tables.data.faces.clear();
     }

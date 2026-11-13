@@ -221,6 +221,19 @@ pub(crate) trait HatBaseTrait: Any {
 
     fn close_face(&mut self, ctx: DispatcherContext);
 
+    /// Drop every reference this hat holds to a [`Resource`].
+    ///
+    /// Called from the runtime's shutdown BEFORE the resource tree is closed.
+    /// `Resource::close` strips `parent`, `ctx` and `face_ctxs` from every resource in the
+    /// tree, but a hat keeps `Arc<Resource>` sets of its own and those are not part of the
+    /// tree, so closing the tree does not touch them. Without this, shutdown leaves a hat
+    /// holding resources whose context has been taken, and the next face close or link-state
+    /// update walks them, unwraps the missing context and panics -- while holding
+    /// `TablesLock::ctrl_lock`, which the panic then poisons for every later operation.
+    ///
+    /// Only the router hat holds such references today, so the default does nothing.
+    fn clear_resources(&mut self) {}
+
     fn update_from_config(
         &mut self,
         _tables_ref: &Arc<TablesLock>,
