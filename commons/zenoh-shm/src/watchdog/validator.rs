@@ -134,6 +134,36 @@ impl WatchdogValidator {
             self.task.kick();
         }
 
+        // A send failure means the validator task is gone. What that MEANS differs by
+        // build, and the two must not be conflated:
+        //
+        // * Under `feature = "test"`, `PeriodicTask` panics on a timer overrun deliberately
+        //   (watchdog/periodic_task.rs). So a gone validator in a test is a real failure that
+        //   upstream chose to make fatal, and swallowing it here makes a dead validator
+        //   invisible: the test then passes with nothing validating anything. Upstream's
+        //   `unwrap` is kept for exactly that case.
+        // * Without that feature the same overrun only logs and the task keeps running, so a
+        //   failed send means the validator has been dropped -- which happens on the ordinary
+        //   teardown path, because `remove` is reached when an `OwnedMetadataDescriptor` is
+        //   dropped and nothing orders that before the validator's shutdown. Panicking there
+        //   killed whichever thread did the dropping, in a service that was merely exiting.
+        //
+        // The non-test path is therefore tolerant but NOT silent: it reports once per
+        // process, because "the validator is gone while we are still making transactions" is
+        // worth seeing exactly once and worthless repeated per dropped descriptor at exit.
+        #[cfg(feature = "test")]
         self.sender.send(transaction).unwrap();
+
+        #[cfg(not(feature = "test"))]
+        if self.sender.send(transaction).is_err() {
+            static REPORTED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!(
+                    "shared-memory watchdog validator is gone; watchdog transactions are no \
+                     longer being applied. Expected while shutting down."
+                );
+            }
+        }
     }
 }
