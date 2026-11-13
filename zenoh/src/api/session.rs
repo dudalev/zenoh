@@ -162,9 +162,14 @@ impl fmt::Debug for LinkEventsListenerState {
 
 pub(crate) struct SessionState {
     pub(crate) primitives: Option<Arc<dyn Primitives>>, // @TODO replace with MaybeUninit ??
-    pub(crate) expr_id_counter: AtomicExprId,           // @TODO: manage rollover and uniqueness
+    /// The next expression id to try. A `u16`, so it wraps: never use its value directly, take
+    /// ids through [`SessionState::next_free_expr_id`].
+    pub(crate) expr_id_counter: AtomicExprId,
     pub(crate) qid_counter: AtomicRequestId,
     pub(crate) local_resources: IntHashMap<ExprId, LocalResource>,
+    /// Expression ids removed from `local_resources` whose `UndeclareKeyExpr` has not been handed
+    /// to the primitives yet. The routing tables still map them, so they are not free to reuse.
+    pub(crate) retiring_expr_ids: Vec<ExprId>,
     pub(crate) remote_resources: IntHashMap<ExprId, Resource>,
     pub(crate) remote_subscribers: HashMap<SubscriberId, KeyExpr<'static>>,
     pub(crate) publishers: HashMap<Id, PublisherState>,
@@ -198,6 +203,7 @@ impl SessionState {
             expr_id_counter: AtomicExprId::new(1), // Note: start at 1 because 0 is reserved for NO_RESOURCE
             qid_counter: AtomicRequestId::new(0),
             local_resources: IntHashMap::new(),
+            retiring_expr_ids: Vec::new(),
             remote_resources: IntHashMap::new(),
             remote_subscribers: HashMap::new(),
             publishers: HashMap::new(),
@@ -253,6 +259,39 @@ impl SessionState {
             inner: primitives,
             _span: self.span.clone().entered(),
         })
+    }
+
+    /// Returns an expression id that is free to declare, or `None` if every id is taken.
+    ///
+    /// `expr_id_counter` wraps after 65,536 allocations, and a session that declares and
+    /// undeclares key expressions in a loop gets there. A value it yields is not free if it is:
+    ///
+    /// * `EMPTY_EXPR_ID`, which is reserved: a key expression declared under it would be
+    ///   published on the empty key expression;
+    /// * still in `local_resources`, i.e. held by a live declaration. Inserting it again would
+    ///   replace that entry while the routing tables refuse the redeclaration ("Resource N
+    ///   remapped. Remapping unsupported!") and keep the old mapping, so data put through the
+    ///   new declaration would be routed on the old key; and undeclaring the new declaration
+    ///   would then remove the mapping the old one still depends on, after which every `put`
+    ///   through the old one is dropped;
+    /// * in `retiring_expr_ids`, i.e. its `UndeclareKeyExpr` is still on its way to the tables.
+    ///
+    /// On `None` the caller declares nothing and the key expression is sent in full.
+    fn next_free_expr_id(&self) -> Option<ExprId> {
+        // Every id but `EMPTY_EXPR_ID` is usable, and the two sets are disjoint.
+        if self.local_resources.len() + self.retiring_expr_ids.len() >= ExprId::MAX as usize {
+            return None;
+        }
+        // At least one usable id is free, and the counter visits every value, so this ends.
+        loop {
+            let expr_id = self.expr_id_counter.fetch_add(1, Ordering::SeqCst);
+            if expr_id != EMPTY_EXPR_ID
+                && !self.local_resources.contains_key(&expr_id)
+                && !self.retiring_expr_ids.contains(&expr_id)
+            {
+                return Some(expr_id);
+            }
+        }
     }
 
     #[inline]
@@ -1508,7 +1547,9 @@ impl Session {
                 }
                 Some(_) => Ok(None),
                 None => {
-                    let expr_id = state.expr_id_counter.fetch_add(1, Ordering::SeqCst);
+                    let Some(expr_id) = state.next_free_expr_id() else {
+                        return Ok(None);
+                    };
                     let mut res = Resource::new(Box::from(prefix));
                     if let Resource::Node(res_node) = &mut res {
                         for kind in [
@@ -1563,6 +1604,9 @@ impl Session {
             entry.count -= 1;
             if entry.count == 0 {
                 state.local_resources.remove(&expr_id);
+                // Until the tables have processed the undeclaration they still map this id to
+                // the old key, so it must not be handed out again yet.
+                state.retiring_expr_ids.push(expr_id);
                 drop(state);
                 primitives.send_declare(&mut Declare {
                     interest_id: None,
@@ -1571,6 +1615,9 @@ impl Session {
                     ext_nodeid: declare::ext::NodeIdType::DEFAULT,
                     body: DeclareBody::UndeclareKeyExpr(UndeclareKeyExpr { id: expr_id }),
                 });
+                zwrite!(self.0.state)
+                    .retiring_expr_ids
+                    .retain(|id| *id != expr_id);
             }
             Ok(())
         } else {
