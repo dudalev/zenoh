@@ -93,7 +93,8 @@ in this fork's changes reaches it" (as this said) is not true.
 
 | command | runs | result |
 |---|---|---|
-| `cargo test` (plain) | **6**, two campaigns | **4 green** at 880 passed / 0 failed / 54 ignored; 2 red |
+| `cargo test` (plain) | 1, after gating the class below | **green**, 782 passed / 0 failed / 102 ignored |
+| `cargo test` (plain), before that gating | 6, two campaigns | 4 green at 880 / 0 / 54; 2 red |
 | the full-feature command above | 1 | green, 152 binaries, 977 passed / 0 failed / 79 ignored |
 | `--no-default-features -F transport_tcp,shared-memory` (the consumer's set) | 1 | builds clean |
 
@@ -105,12 +106,18 @@ Each red run failed exactly ONE test, and a DIFFERENT one each time:
   sub.try_recv().unwrap().is_none()`, a timing-dependent ABSENCE assertion. `liveliness` has
   zero uses in the consumer.
 
-Neither is related to anything this fork changes, and they are the third and fourth members of
-one class: a flaky upstream test for a feature we do not ship. The first two (unixsock, and a
-port-collision race in zenoh-ext) are gated; these two are not, deliberately, because gating
-each one as it appears treats the instance and not the class -- and the class is large. Of the
-70 tests in `io/zenoh-transport/tests/unicast_transport.rs` only 6 exercise TCP; the rest
-cover quic, udp, tls, ws and unix transports the consumer never builds.
+Neither was related to anything this fork changes: they were the third and fourth members of
+one class, a flaky upstream test for a feature we do not ship. **That class is now gated**, by
+operator decision, as a class rather than one test at a time -- which had been tried twice and
+produced two more members each time. 52 tests in
+`io/zenoh-transport/tests/unicast_transport.rs` and the whole `liveliness` target, every one
+selected by parsing its own `#[cfg]` against the consumer's feature set rather than by reading
+test names. 7 of that file's 70 tests remain: the TCP path, zid matching, link close, and one
+that needs no transport at all.
+
+The arithmetic of that change reconciles, which is how it was checked: ignored 54 + 52 - 4
+(liveliness's own ignored tests, which leave the totals entirely with their target) = 102, and
+passed 880 - 52 - 46 = 782.
 
 **So the plain suite is not reliably green, and saying so is the point.** Four green in six
 is the measurement; a single run is not. One run cannot distinguish a green suite from a lucky
