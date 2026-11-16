@@ -26,7 +26,27 @@ version = { workspace = true }
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-default = ["zenoh/default"]
+# SHARED MEMORY IS ON BY DEFAULT IN THIS FORK (hecate, 2026-11-16).
+#
+# Upstream leaves it opt-in, so a plain `cargo install zenohd` produces a
+# router with NO shared-memory support. That matters here because every hecate2
+# service runs in CLIENT mode, which makes the router a relay on every hop --
+# so the router is the end of the hop that decides whether SHM can be used at
+# all, and zenoh's own docs are explicit that "shared memory needs to be
+# enabled also on the subscriber side" or the session falls back to network
+# mode.
+#
+# Measured 2026-11-16: the installed `zenohd` had ZERO shared-memory symbols
+# while every hecate2 service binary had them, because the workspace pins
+# `zenoh` with `features = ["transport_tcp", "shared-memory"]`. So `shm = true`
+# in all 41 shipped configs was inert -- the capable end was talking to an
+# incapable one.
+#
+# Defaulting it on removes a silent, install-flag-dependent failure. It only
+# ENABLES the capability: zenoh still gates actual use on its own
+# `message_size_threshold` (3072 B by default), so nothing changes for the
+# payloads below that.
+default = ["zenoh/default", "shared-memory"]
 shared-memory = ["zenoh/shared-memory"]
 
 [dependencies]
