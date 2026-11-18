@@ -801,6 +801,18 @@ pub struct ShmProvider<Backend> {
     busy_list: Mutex<Vec<BusyChunk>>,
 }
 
+impl<Backend> ShmProvider<Backend> {
+    /// The backend behind this provider.
+    ///
+    /// Exposed rather than adding a segment-id method to `ShmProviderBackend`,
+    /// because that trait is public API and every custom backend implements it;
+    /// a segment id is also meaningless for a backend spanning several segments.
+    #[zenoh_macros::unstable_doc]
+    pub fn backend(&self) -> &Backend {
+        &self.backend
+    }
+}
+
 impl<Backend: Default> Default for ShmProvider<Backend> {
     fn default() -> Self {
         Self::new(Backend::default())

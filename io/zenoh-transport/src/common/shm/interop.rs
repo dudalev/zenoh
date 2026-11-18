@@ -38,7 +38,7 @@ use zenoh_result::ZResult;
 use zenoh_runtime::ZRuntime;
 use zenoh_shm::{
     api::{
-        common::types::ProtocolID,
+        common::types::{ProtocolID, SegmentID},
         protocol_implementations::posix::posix_shm_provider_backend::PosixShmProviderBackend,
         provider::shm_provider::{
             ConstBool, Defragment, GarbageCollect, JustAlloc, ShmProvider, ShmProviderBuilder,
@@ -209,6 +209,23 @@ impl LazyShmProvider {
                 ProviderInitStateInner::Error
             }
         };
+    }
+
+    /// The id of the segment backing this provider's pool, once it exists.
+    ///
+    /// `None` while the provider has not been built, or after a build that
+    /// failed -- in both cases there is no pool for a peer to mount, and
+    /// advertising one would send a peer chasing a segment that is not there.
+    /// With eager initialisation this is `Some` from session open (BER-2169),
+    /// which is what makes advertising it at link establishment possible at all
+    /// (BER-2170).
+    pub fn data_segment_id(&self) -> Option<SegmentID> {
+        match &*zlock!(self.state) {
+            ProviderInitStateInner::Ready(provider) => Some(provider.backend().segment_id()),
+            ProviderInitStateInner::Enabled(_)
+            | ProviderInitStateInner::Initializing(_)
+            | ProviderInitStateInner::Error => None,
+        }
     }
 
     pub fn try_get_provider(&self) -> ProviderInitState {

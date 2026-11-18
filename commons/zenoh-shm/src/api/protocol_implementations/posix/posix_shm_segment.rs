@@ -34,6 +34,12 @@ pub(crate) struct PosixShmSegment {
 }
 
 impl PosixShmSegment {
+    /// The id this segment is published under, so a PEER can be told to mount
+    /// it before any message references it (BER-2170).
+    pub(crate) fn segment_id(&self) -> SegmentID {
+        self.segment.id()
+    }
+
     pub(crate) fn create(alloc_size: NonZeroUsize) -> ZResult<Self> {
         let segment = ArrayInSHM::create(alloc_size)?;
         Ok(Self { segment })

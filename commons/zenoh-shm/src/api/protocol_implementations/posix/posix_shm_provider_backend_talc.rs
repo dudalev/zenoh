@@ -25,7 +25,10 @@ use zenoh_result::ZResult;
 
 use super::posix_shm_segment::PosixShmSegment;
 use crate::api::{
-    common::{types::ProtocolID, with_id::WithProtocolID},
+    common::{
+        types::{ProtocolID, SegmentID},
+        with_id::WithProtocolID,
+    },
     protocol_implementations::posix::protocol_id::POSIX_PROTOCOL_ID,
     provider::{
         chunk::ChunkDescriptor,
@@ -87,6 +90,12 @@ impl std::fmt::Debug for PosixShmProviderBackendTalc {
 }
 
 impl PosixShmProviderBackendTalc {
+    /// The id of the single segment backing this pool, for advertising to a
+    /// peer at link establishment (BER-2170).
+    pub fn segment_id(&self) -> SegmentID {
+        self.segment.segment_id()
+    }
+
     /// Get the builder to construct a new instance
     #[zenoh_macros::unstable_doc]
     pub fn builder<Layout>(layout: Layout) -> PosixShmProviderBackendTalcBuilder<Layout> {

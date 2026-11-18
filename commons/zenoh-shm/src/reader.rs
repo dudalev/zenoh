@@ -12,7 +12,7 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 
-use std::{collections::BTreeMap, ops::Deref, sync::Arc};
+use std::{collections::BTreeMap, num::NonZeroUsize, ops::Deref, sync::Arc};
 
 use zenoh_core::{bail, zerror, zread, zwrite};
 use zenoh_result::ZResult;
@@ -45,6 +45,38 @@ impl Deref for ShmReader {
 impl ShmReader {
     pub fn new(client_storage: Arc<ShmClientStorage>) -> Self {
         Self { client_storage }
+    }
+
+    /// Mount a peer's segment NOW, before any message refers to it.
+    ///
+    /// `ensure_data_segment` is reached only from `read_shmbuf`, i.e. from a
+    /// message that already carries a chunk descriptor -- so a receiver cannot
+    /// learn a publisher's segment id, and therefore cannot map its pool, until
+    /// the first buffer arrives. Mapping `mlock`s the segment HERE, in the
+    /// receiver, so that first buffer is also the moment a receiver discovers it
+    /// has no locked-memory budget left for this publisher. The message is then
+    /// discarded, and the sender sees a timeout or nothing at all (BER-2167).
+    ///
+    /// This lets the establishment handshake mount the peer's pool while both
+    /// peers are known and a failure can still be attributed and refused
+    /// (BER-2170). It is idempotent: `ensure_data_segment` returns an
+    /// already-mounted segment from its map.
+    ///
+    /// Takes only `(protocol_id, segment)` because that is all the mount needs;
+    /// the chunk id in a descriptor selects a buffer WITHIN a segment and is not
+    /// required to attach one.
+    pub fn premount_segment(&self, protocol_id: ProtocolID, segment: SegmentID) -> ZResult<()> {
+        self.ensure_data_segment(
+            protocol_id,
+            &ChunkDescriptor {
+                segment,
+                // Not read by the mount: `ensure_data_segment` keys on
+                // `(protocol_id, segment)` and attaches by `segment` alone.
+                chunk: 0,
+                len: NonZeroUsize::new(1).unwrap(),
+            },
+        )
+        .map(|_| ())
     }
 
     pub fn read_shmbuf(&self, info: ShmBufInfo) -> ZResult<Arc<ShmBufInner>> {
