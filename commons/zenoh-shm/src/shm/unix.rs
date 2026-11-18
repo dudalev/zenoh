@@ -118,7 +118,8 @@ impl<ID: SegmentID> SegmentImpl<ID> {
         };
 
         // map segment into our address space
-        let data_ptr = Self::map(len, fd).map_err(|e| SegmentCreateError::OsError(e as _))?;
+        let data_ptr =
+            Self::map(len, fd, true).map_err(|e| SegmentCreateError::OsError(e as _))?;
 
         Ok(Self {
             lock_fd,
@@ -189,7 +190,8 @@ impl<ID: SegmentID> SegmentImpl<ID> {
         };
 
         // map segment into our address space
-        let data_ptr = Self::map(len, fd).map_err(|e| SegmentOpenError::OsError(e as _))?;
+        let data_ptr =
+            Self::map(len, fd, false).map_err(|e| SegmentOpenError::OsError(e as _))?;
 
         Ok(Self {
             lock_fd,
@@ -272,7 +274,30 @@ impl<ID: SegmentID> SegmentImpl<ID> {
         format!("{id}.zenoh")
     }
 
-    fn map(len: NonZeroUsize, fd: &OwnedFd) -> nix::Result<NonNull<c_void>> {
+    /// `mmap` the segment, and `mlock` it only when this process OWNS it.
+    ///
+    /// The owner locks, so the pool cannot be paged out from under the data
+    /// path. A process that merely OPENS someone else's segment does not
+    /// (BER-2170), for two reasons:
+    ///
+    /// * The pages are already pinned. Both sides map the same tmpfs object
+    ///   with `MAP_SHARED`, so they share physical pages and the creator's
+    ///   `mlock` has already made them unswappable. A second `mlock` from a
+    ///   reader changes no page's residency.
+    /// * `RLIMIT_MEMLOCK` is PER PROCESS, so that second lock charges a reader
+    ///   for memory it does not own, once per publisher it receives from. A
+    ///   limit sized for one pool is then a limit for one publisher, and the
+    ///   budget is exhausted by fan-in rather than by any real demand. Past
+    ///   that point `open` fails, the message carrying the buffer is discarded,
+    ///   and the sender sees a timeout or nothing at all -- which is BER-2167,
+    ///   and is what killed the paper harnesses on giedi and sanafir.
+    ///
+    /// The residual: if the OWNER exits while a reader still holds the mapping,
+    /// those pages stop being locked by anyone and could be evicted. A reader
+    /// still reading a dead publisher's pool is already a degenerate case, and
+    /// a page fault there is a far better outcome than refusing to receive from
+    /// a live one.
+    fn map(len: NonZeroUsize, fd: &OwnedFd, lock: bool) -> nix::Result<NonNull<c_void>> {
         let prot = ProtFlags::PROT_READ | ProtFlags::PROT_WRITE;
         #[cfg(target_os = "linux")]
         let flags = MapFlags::MAP_SHARED | MapFlags::MAP_NORESERVE;
@@ -288,9 +313,11 @@ impl<ID: SegmentID> SegmentImpl<ID> {
         // SAFETY: this is safe as we are not using any unsafe flags and FD is correct
         let ptr = unsafe { mmap(None, len, prot, flags, fd, 0) }?;
 
-        tracing::trace!("mlock(addr={:?}, length={})", ptr, len,);
-        // SAFETY: this is safe as ptr produced by shm_open/mmap is page-aligned
-        unsafe { mlock(ptr, len.get()) }?;
+        if lock {
+            tracing::trace!("mlock(addr={:?}, length={})", ptr, len,);
+            // SAFETY: this is safe as ptr produced by shm_open/mmap is page-aligned
+            unsafe { mlock(ptr, len.get()) }?;
+        }
 
         Ok(ptr)
     }
