@@ -14,7 +14,11 @@
 use std::{
     fmt::Debug,
     num::NonZeroUsize,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, OnceLock,
+    },
+    time::Instant,
 };
 
 use zenoh_buffers::{reader::HasReader, ZBuf, ZSlice, ZSliceKind};
@@ -50,6 +54,72 @@ use crate::unicast::establishment::ext::shm::{
     },
     segment::RXAuthSegment,
 };
+
+/// How often a discarded-message report may be emitted, however many are
+/// dropped in between. A failed map is a PER-MESSAGE event on the receive path,
+/// so an unconditional log is two defects at once: a malformed or oversized
+/// sender floods the log, and the flood is what makes a real line invisible.
+const SHM_RX_DROP_REPORT_EVERY_MS: u64 = 10_000;
+
+/// Total messages discarded because their shared-memory buffer could not be
+/// mapped, for the life of the process.
+static SHM_RX_DROPS: AtomicU64 = AtomicU64::new(0);
+/// The total as of the last report, so each report can state how many were lost
+/// since the previous one rather than only a running sum.
+static SHM_RX_DROPS_REPORTED: AtomicU64 = AtomicU64::new(0);
+/// When the last report was emitted, in ms since the first call.
+static SHM_RX_LAST_REPORT_MS: AtomicU64 = AtomicU64::new(0);
+
+fn shm_rx_now_ms() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    u64::try_from(START.get_or_init(Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Is this discard the one that gets reported?
+///
+/// Pure, so both directions are testable without capturing log output. The
+/// FIRST discard always reports: `last_ms` starts at zero, so a process that
+/// drops a message in its first few seconds would otherwise stay silent for the
+/// whole window -- and the first one is the most informative, because it is the
+/// one closest to whatever changed.
+#[must_use]
+fn shm_rx_drop_should_report(total: u64, now_ms: u64, last_ms: u64) -> bool {
+    total == 1 || now_ms.saturating_sub(last_ms) >= SHM_RX_DROP_REPORT_EVERY_MS
+}
+
+/// Report a message DISCARDED because its shared-memory buffer could not be
+/// mapped, and count it.
+///
+/// This replaced a `tracing::debug!` that every service silenced, since they all
+/// run at `RUST_LOG=info`. The message is dropped either way -- that behaviour is
+/// deliberately unchanged here, because failing the transport instead would turn
+/// a lost payload into a dead link -- but it is no longer SILENT.
+///
+/// The loss is not symmetric across routes, which is why the text says so: a
+/// query shows up at the caller as a plain timeout, while a pub/sub route has no
+/// timeout at all and loses the payload with nothing to notice it.
+pub fn report_shm_rx_drop(e: &dyn core::fmt::Display) {
+    let total = SHM_RX_DROPS.fetch_add(1, Ordering::Relaxed) + 1;
+    let now_ms = shm_rx_now_ms();
+    let last_ms = SHM_RX_LAST_REPORT_MS.load(Ordering::Relaxed);
+    if !shm_rx_drop_should_report(total, now_ms, last_ms) {
+        return;
+    }
+    // A benign race here costs at most a duplicate line, so the cheap ordering
+    // is deliberate: a missed report would be worse than a repeated one.
+    SHM_RX_LAST_REPORT_MS.store(now_ms, Ordering::Relaxed);
+    let previously = SHM_RX_DROPS_REPORTED.swap(total, Ordering::Relaxed);
+    tracing::error!(
+        total_dropped = total,
+        since_last_report = total - previously,
+        "DISCARDED a message whose shared-memory buffer could not be mapped, and the \
+         payload is LOST: {e}. A query surfaces this as a plain timeout; a pub/sub route \
+         has no timeout and loses it silently. The usual cause is RLIMIT_MEMLOCK ON THIS \
+         RECEIVER: opening a sender's pool locks it HERE too, so a receiver needs one \
+         pool's budget for EVERY publisher it receives shared memory from, not one in \
+         total"
+    );
+}
 
 #[derive(Debug)]
 struct ProviderInitCfg {
@@ -103,6 +173,42 @@ impl LazyShmProvider {
             message_size_threshold,
             state,
         }
+    }
+
+    /// Build the provider NOW, synchronously, instead of on first use.
+    ///
+    /// `ShmInitMode::Init` initialises the SHM subsystem GLOBALS at session
+    /// open (`zenoh_shm::init::init`), but the transport's own provider stayed
+    /// lazy -- so the segment was still allocated on the first SHM interaction,
+    /// mid-session. This is the missing half of "eager".
+    ///
+    /// Synchronous on purpose, rather than awaiting the `spawn_blocking` path
+    /// `try_get_provider` uses: that one hands its result down a `flume`
+    /// channel with a single slot, so a caller that waited on its own clone of
+    /// the receiver would CONSUME the message and leave the stored state stuck
+    /// in `Initializing` for ever. Building under the lock has no such race.
+    ///
+    /// Idempotent: only the not-yet-started state does any work, so calling it
+    /// after the provider is `Ready` (or has already failed) is a no-op and a
+    /// later `try_get_provider` sees what this left behind.
+    ///
+    /// A failure is recorded as `Error` and logged, NOT returned: an eager
+    /// build that cannot allocate must leave the transport exactly where a lazy
+    /// one would -- falling back to the network path -- rather than failing the
+    /// session open on a path that was previously best-effort.
+    pub fn init_eagerly(&self) {
+        let mut lock = zlock!(self.state);
+        let ProviderInitStateInner::Enabled(cfg) = &*lock else {
+            return;
+        };
+        let shm_size = cfg.shm_size.get();
+        *lock = match ShmProviderBuilder::default_backend(shm_size).wait() {
+            Ok(backend) => ProviderInitStateInner::Ready(Arc::new(backend)),
+            Result::Err(err) => {
+                tracing::error!("Error creating eager ShmProvider: {err}");
+                ProviderInitStateInner::Error
+            }
+        };
     }
 
     pub fn try_get_provider(&self) -> ProviderInitState {
@@ -608,4 +714,99 @@ pub fn map_zslice_to_shmbuf(zslice: &mut ZSlice, shmr: &ShmReader) -> ZResult<()
     *zslice = smb.into();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **A DISCARDED MESSAGE IS REPORTED, AND THE RATE LIMIT CANNOT SILENCE THE
+    /// FIRST ONE.**
+    ///
+    /// Two-sided, because a predicate that always reported would pass a
+    /// one-sided test while reintroducing the flood the limit exists to prevent.
+    #[test]
+    fn a_dropped_shm_message_reports_once_per_window_and_always_the_first() {
+        // THE FIRST DISCARD, in a process that has only just started, so the
+        // window has NOT elapsed. Reported anyway: it is the one closest to
+        // whatever changed, and the old code's silence here is the defect.
+        assert!(
+            shm_rx_drop_should_report(1, 5, 0),
+            "the first discard must report even inside the window"
+        );
+
+        // THE QUIET DIRECTION: a later discard inside the window must NOT
+        // report, or a malformed sender floods the log per message and the
+        // flood is what hides a real line.
+        assert!(
+            !shm_rx_drop_should_report(2, SHM_RX_DROP_REPORT_EVERY_MS - 1, 0),
+            "a discard inside the window must stay quiet"
+        );
+        assert!(
+            !shm_rx_drop_should_report(9_999, 12_000, 11_999),
+            "a high total does not by itself earn a report"
+        );
+
+        // AND IT RECOVERS: once the window has elapsed the next discard reports,
+        // so a sustained failure is visible rather than reported once and
+        // forgotten.
+        assert!(
+            shm_rx_drop_should_report(2, SHM_RX_DROP_REPORT_EVERY_MS, 0),
+            "exactly at the window the next discard reports"
+        );
+        assert!(
+            shm_rx_drop_should_report(500, 40_000, 12_000),
+            "a sustained failure keeps reporting"
+        );
+    }
+
+    /// **EAGER INIT MUST LEAVE NO BUILD FOR THE FIRST MESSAGE TO WAIT ON.**
+    ///
+    /// Asserted as "the pending state is unreachable afterwards" rather than as
+    /// "the provider is Ready", because a host whose `RLIMIT_MEMLOCK` is below
+    /// the pool cannot allocate at all -- and on such a host `Ready` is simply
+    /// not available. `Error` is a correct outcome: it falls back to the network
+    /// path, which is what a failed lazy build did too. What must NOT survive is
+    /// `Initializing`, the state that means a message is waiting on a background
+    /// build -- that wait is the latency `ShmInitMode::Init` promises to remove.
+    #[test]
+    fn init_eagerly_leaves_no_lazy_build_for_the_first_message() {
+        let provider = LazyShmProvider::new(NonZeroUsize::new(1024 * 1024).unwrap(), 0);
+
+        // THE CONTROL: untouched, it starts in the state that makes the first
+        // message pay for the build. Without this the test could pass against a
+        // provider that was never lazy to begin with.
+        assert!(
+            matches!(&*zlock!(provider.state), ProviderInitStateInner::Enabled(_)),
+            "a fresh provider must start lazy, or this test proves nothing"
+        );
+
+        provider.init_eagerly();
+
+        assert!(
+            !matches!(
+                &*zlock!(provider.state),
+                ProviderInitStateInner::Enabled(_) | ProviderInitStateInner::Initializing(_)
+            ),
+            "eager init must settle the provider, leaving neither a lazy build nor a pending one"
+        );
+        assert!(
+            !matches!(
+                provider.try_get_provider(),
+                ProviderInitState::Initializing(_)
+            ),
+            "the first message must not find a background build still running"
+        );
+
+        // IDEMPOTENT: the runtime may reach this more than once, and a second
+        // call must not restart a build or discard a provider already in use.
+        provider.init_eagerly();
+        assert!(
+            !matches!(
+                provider.try_get_provider(),
+                ProviderInitState::Initializing(_)
+            ),
+            "a second eager init must not reopen the lazy path"
+        );
+    }
 }

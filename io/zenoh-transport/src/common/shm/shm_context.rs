@@ -98,10 +98,28 @@ impl ShmContext {
         }
 
         let shm_provider = if *cfg.transport_optimization.enabled() {
-            Some(Arc::new(LazyShmProvider::new(
+            let provider = Arc::new(LazyShmProvider::new(
                 *cfg.transport_optimization.pool_size(),
                 *cfg.transport_optimization.message_size_threshold(),
-            )))
+            ));
+            // EAGER MEANS THE PROVIDER TOO, not only the globals.
+            //
+            // `ShmInitMode::Init` was honoured one layer up, by
+            // `zenoh_shm::init::init()`, which initialises the subsystem
+            // globals -- client storage, metadata, cleanup and both watchdogs.
+            // The TRANSPORT's provider was not covered, so the segment was
+            // still allocated on the first SHM interaction, mid-session, which
+            // is precisely what `init` promises not to do: "guarantees no
+            // latency impact when first SHM buffer is processed".
+            //
+            // Doing it here rather than at the `init()` call site because this
+            // is where the provider is constructed and where `ShmConf` is in
+            // hand; the alternative would be plumbing the provider back up to
+            // the runtime purely to initialise it.
+            if matches!(cfg.mode(), zenoh_config::ShmInitMode::Init) {
+                provider.init_eagerly();
+            }
+            Some(provider)
         } else {
             None
         };
