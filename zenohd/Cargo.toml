@@ -29,11 +29,20 @@ version = { workspace = true }
 # SHARED MEMORY IS ON BY DEFAULT IN THIS FORK (hecate, 2026-11-16).
 #
 # Upstream leaves it opt-in, so a plain `cargo install zenohd` produces a
-# router with NO shared-memory support. That matters here because every hecate2
-# service runs in CLIENT mode, which makes the router a relay on every hop --
-# so the router is the end of the hop that decides whether SHM can be used at
-# all, and zenoh's own docs are explicit that "shared memory needs to be
-# enabled also on the subscriber side" or the session falls back to network
+# router with NO shared-memory support. zenoh's own docs are explicit that
+# "shared memory needs to be enabled also on the subscriber side" or the session
+# falls back to network, so a relay without it ends shared memory at that hop.
+#
+# NOTE, corrected 2026-11-18: this previously said every hecate2 service runs in
+# CLIENT mode, which made the router a relay on EVERY hop. That is no longer
+# true -- services run in PEER mode and BER-2085 restricted their multicast
+# autoconnect to `peer`, so they no longer link to the router at all. zenohd
+# still holds a residual set of sessions (measured: it dropped from 63.7% of a
+# core to about 10%, not to idle), so the feature is not useless, but it is no
+# longer on the path of ordinary service-to-service traffic. Whether zenohd
+# needs shared memory at all is now an open question rather than a settled
+# requirement; it is left enabled because disabling it is the change that would
+# need measuring
 # mode.
 #
 # Measured 2026-11-16: the installed `zenohd` had ZERO shared-memory symbols

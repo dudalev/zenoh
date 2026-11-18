@@ -134,9 +134,17 @@ other means and are fixed in their own commits; they are not part of that 104.
 **The shared-memory targets run but cannot pass on a memory-capped host.** `zenoh/tests/shm.rs`
 reports 10 tests, where before the feature reached the crate at all it reported `running 0
 tests`. 5 pass; the rest fail or hang downstream of one line --
-`Unable to create POSIX shm segment: OS error 12` (ENOMEM) -- because shm pages are charged to
-the cgroup the test runs in, not because `/dev/shm` is full (30 GB free when measured). Run
-them without a memory cap, or treat them as unverifiable on that host and say which.
+`Unable to create POSIX shm segment: OS error 12` (ENOMEM) -- because the transport pool is
+`mlock`ed by whoever creates it and the default pool is 16 MiB, which exceeds `RLIMIT_MEMLOCK`
+on an ordinary host. It is NOT because `/dev/shm` is full (30 GB free when measured), and it is
+NOT cgroup memory charging, which this file previously said: removing the memory cap does not
+help, and `RLIMIT_MEMLOCK` alone reproduces the exact error. Corrected 2026-11-18 after the
+same error was traced to the limit on two production hosts whose `Max locked memory` was
+8388608 bytes.
+
+Either raise the limit for the run (`prlimit --memlock=...`), or shrink
+`transport/shared_memory/transport_optimization/pool_size`, or treat them as unverifiable on
+that host and say which.
 
 Run everything, including the gated targets, with:
 
