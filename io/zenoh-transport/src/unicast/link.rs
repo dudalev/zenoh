@@ -28,6 +28,8 @@ use crate::{
     common::shm::interop::LinkShmHandoffConfig,
     unicast::establishment::ext::shm::handoff::{RxHandoffChannel, TxHandoffStorage},
 };
+#[cfg(feature = "shared-memory")]
+use zenoh_shm::reader::PremountedSegment;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum TransportLinkUnicastDirection {
@@ -49,6 +51,15 @@ pub(crate) struct TransportLinkUnicastConfig {
 pub(crate) struct TransportLinkShmHandoff {
     pub(crate) tx: TxHandoffStorage,
     pub(crate) rx: Arc<RxHandoffChannel>,
+    /// Peer pools this link pre-mounted at establishment, released when the
+    /// last clone of this link goes away (BER-2170).
+    ///
+    /// `Arc` because this struct is `Clone` and a lease must be released ONCE,
+    /// not once per clone. Carried rather than dropped here: dropping it is
+    /// what made the pre-mount inert, since the lease died the moment
+    /// establishment finished and the peer's pool was re-mounted lazily on the
+    /// first buffer anyway.
+    pub(crate) _premounted: Arc<Vec<PremountedSegment>>,
 }
 
 #[cfg(feature = "shared-memory")]
@@ -57,6 +68,7 @@ impl From<LinkShmHandoffConfig> for TransportLinkShmHandoff {
         Self {
             tx: value.tx.into(),
             rx: Arc::new(value.rx),
+            _premounted: Arc::new(value.premounted),
         }
     }
 }

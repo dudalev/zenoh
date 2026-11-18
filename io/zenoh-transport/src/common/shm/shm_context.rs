@@ -97,6 +97,17 @@ impl ShmContext {
             return Ok(None);
         }
 
+        // THE MANDATORY SEGMENTS FIRST (BER-2171). The auth segment is required
+        // -- its failure is a `?` that refuses the session -- while the pool
+        // below is best-effort and degrades to the network path. Allocating the
+        // pool first let it consume the locked-memory budget ahead of the auth
+        // segment, so a tight limit refused the session instead of merely
+        // losing shared memory.
+        let shm_reader = external_reader
+            .unwrap_or_else(|| ShmReader::new((*GLOBAL_CLIENT_STORAGE.read()).clone()));
+
+        let auth = AuthUnicast::new(&shm_reader.supported_protocols())?;
+
         let shm_provider = if *cfg.transport_optimization.enabled() {
             let provider = Arc::new(LazyShmProvider::new(
                 *cfg.transport_optimization.pool_size(),
@@ -131,11 +142,6 @@ impl ShmContext {
             reply: messages.contains(&zenoh_config::DataMessage::Reply),
         };
 
-        let shm_reader = external_reader
-            .unwrap_or_else(|| ShmReader::new((*GLOBAL_CLIENT_STORAGE.read()).clone()));
-
-        let auth = AuthUnicast::new(&shm_reader.supported_protocols())?;
-
         Ok(Some(Self {
             shm_provider,
             policy,
@@ -146,5 +152,59 @@ impl ShmContext {
 
     pub fn shm_provider(&self) -> &Option<Arc<LazyShmProvider>> {
         &self.shm_provider
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **IN `init` MODE THE CONTEXT HAS A POOL ID TO ADVERTISE** (BER-2169,
+    /// BER-2173).
+    ///
+    /// The layer between the config flag and the handshake. If this is `None`
+    /// the handshake advertises nothing and the pre-mount silently never
+    /// happens, which is indistinguishable from success at every level above.
+    #[test]
+    fn init_mode_yields_a_pool_id_to_advertise() {
+        let mut cfg = zenoh_config::ShmConf::default();
+        cfg.set_enabled(true).unwrap();
+        cfg.set_mode(zenoh_config::ShmInitMode::Init).unwrap();
+        // Small, because the default 16 MiB pool is mlocked by its owner and
+        // will not allocate under a typical RLIMIT_MEMLOCK.
+        cfg.transport_optimization
+            .set_pool_size(std::num::NonZeroUsize::new(64 * 1024).unwrap())
+            .unwrap();
+
+        let context = ShmContext::new(cfg, None)
+            .expect("context creation failed")
+            .expect("shm was enabled, so a context must exist");
+
+        let provider = context
+            .shm_provider
+            .as_ref()
+            .expect("transport optimisation is on by default, so a provider must exist");
+
+        assert!(
+            provider.data_segment_id().is_some(),
+            "eager mode must leave a pool id to advertise; None means the handshake offers \
+             nothing and the peer silently mounts on first use instead"
+        );
+    }
+
+    /// The control: in `lazy` mode there is deliberately nothing to advertise.
+    #[test]
+    fn lazy_mode_has_no_pool_id_to_advertise() {
+        let mut cfg = zenoh_config::ShmConf::default();
+        cfg.set_enabled(true).unwrap();
+        cfg.set_mode(zenoh_config::ShmInitMode::Lazy).unwrap();
+
+        let context = ShmContext::new(cfg, None).unwrap().unwrap();
+        let provider = context.shm_provider.as_ref().unwrap();
+
+        assert!(
+            provider.data_segment_id().is_none(),
+            "lazy mode must not have built a pool yet"
+        );
     }
 }

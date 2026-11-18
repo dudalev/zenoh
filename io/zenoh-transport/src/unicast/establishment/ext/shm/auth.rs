@@ -34,7 +34,10 @@ use zenoh_protocol::{
 };
 use zenoh_result::{zerror, Error as ZError, ZResult};
 use zenoh_shm::{
-    api::common::types::{ProtocolID, SegmentID},
+    api::{
+        common::types::{ProtocolID, SegmentID},
+        protocol_implementations::posix::protocol_id::POSIX_PROTOCOL_ID,
+    },
     reader::{PremountedSegment, ShmReader},
 };
 
@@ -193,7 +196,7 @@ mod data_segment_wire_tests {
     use zenoh_buffers::{reader::HasReader, writer::HasWriter};
     use zenoh_codec::{RCodec, WCodec, Zenoh080};
 
-    use super::{read_data_segment, write_data_segment, InitSyn, EXT_DATA_SEGMENT_TAG};
+    use super::{read_data_segment, write_data_segment, InitAck, InitSyn, EXT_DATA_SEGMENT_TAG};
 
     /// **A ROLLING DEPLOY MUST WORK IN BOTH DIRECTIONS.**
     ///
@@ -268,6 +271,86 @@ mod data_segment_wire_tests {
                     &InitSyn {
                         alice_segment: 7,
                         alice_data_segment: None,
+                    },
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            none_bytes, old_bytes,
+            "advertising nothing must put nothing on the wire"
+        );
+    }
+
+    /// **BOB'S HALF IS COMPATIBLE TOO** (BER-2173).
+    ///
+    /// `InitAck` carries the same appended field as `InitSyn`, and the two
+    /// codecs are written separately -- so covering only `InitSyn` left the
+    /// direction an ACCEPTOR sends untested. In a rolling deploy that is the
+    /// half an upgraded acceptor sends to an old opener.
+    ///
+    /// `InitAck` has a field BEFORE the segment id, so this also pins that the
+    /// appended bytes do not disturb the ones already there.
+    #[test]
+    fn bobs_init_ack_is_compatible_with_a_peer_that_does_not_know_the_field() {
+        let codec = Zenoh080::new();
+
+        // What an OLD acceptor writes: challenge, then auth segment, nothing more.
+        let mut old_bytes = vec![];
+        {
+            let mut w = old_bytes.writer();
+            codec.write(&mut w, 0xDEAD_BEEF_u64).unwrap();
+            codec.write(&mut w, &11u32).unwrap();
+        }
+
+        let decoded: InitAck = codec.read(&mut old_bytes.reader()).unwrap();
+        assert_eq!(decoded.alice_challenge, 0xDEAD_BEEF);
+        assert_eq!(decoded.bob_segment, 11);
+        assert_eq!(
+            decoded.bob_data_segment, None,
+            "an old acceptor advertises no pool, and that must decode cleanly"
+        );
+
+        // A NEW acceptor WITH a pool.
+        let mut new_bytes = vec![];
+        {
+            let mut w = new_bytes.writer();
+            codec
+                .write(
+                    &mut w,
+                    &InitAck {
+                        alice_challenge: 0xDEAD_BEEF,
+                        bob_segment: 11,
+                        bob_data_segment: Some(77),
+                    },
+                )
+                .unwrap();
+        }
+
+        // An OLD opener reads the two fields it knows and stops, without
+        // requiring the buffer to be exhausted.
+        let mut r = new_bytes.reader();
+        let challenge: u64 = codec.read(&mut r).unwrap();
+        let segment: u32 = codec.read(&mut r).unwrap();
+        assert_eq!(
+            (challenge, segment),
+            (0xDEAD_BEEF, 11),
+            "an old opener must still read both known fields from a new InitAck"
+        );
+
+        let round: InitAck = codec.read(&mut new_bytes.reader()).unwrap();
+        assert_eq!(round.bob_data_segment, Some(77));
+
+        // No pool advertised must be byte-identical to an old acceptor.
+        let mut none_bytes = vec![];
+        {
+            let mut w = none_bytes.writer();
+            codec
+                .write(
+                    &mut w,
+                    &InitAck {
+                        alice_challenge: 0xDEAD_BEEF,
+                        bob_segment: 11,
+                        bob_data_segment: None,
                     },
                 )
                 .unwrap();
@@ -507,7 +590,18 @@ impl<'a> ShmFsm<'a> {
         let (Some(segment), Some(reader)) = (peer, self.reader.as_ref()) else {
             return;
         };
-        for protocol in reader.supported_protocols() {
+        // THE TRANSPORT POOL IS ALWAYS POSIX, so it is mounted under that
+        // protocol alone (BER-2173). Looping every supported protocol with one
+        // segment id attached it under protocols it does not belong to, and
+        // logged a spurious ERROR for each one that could not. The TX side
+        // already states the same thing: `unicast/manager.rs` offers the
+        // provider only when the partner supports `POSIX_PROTOCOL_ID`.
+        //
+        // A peer whose pool is NOT posix therefore advertises an id we do not
+        // pre-mount, and falls back to mounting on the first buffer -- the
+        // behaviour before any of this, so no worse.
+        if reader.supported_protocols().contains(&POSIX_PROTOCOL_ID) {
+            let protocol = POSIX_PROTOCOL_ID;
             match reader.premount_segment(protocol, segment) {
                 Ok(lease) => zlock!(self.premounted).push(lease),
                 Err(e) => {

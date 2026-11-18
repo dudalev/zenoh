@@ -50,7 +50,7 @@ impl TransportUnicastLowlatency {
                     &shm_context.shm_reader,
                     rx_handoff,
                 ) {
-                    crate::common::shm::interop::report_shm_rx_drop(&e);
+                    crate::common::shm::interop::report_shm_rx_drop(self.config.zid, &e);
                     return Ok(());
                 }
             }

@@ -314,7 +314,26 @@ impl<ID: SegmentID> SegmentImpl<ID> {
         if lock {
             tracing::trace!("mlock(addr={:?}, length={})", ptr, len,);
             // SAFETY: this is safe as ptr produced by shm_open/mmap is page-aligned
-            unsafe { mlock(ptr, len.get()) }?;
+            if let Err(e) = unsafe { mlock(ptr, len.get()) } {
+                // UNMAP BEFORE RETURNING (BER-2173). A bare `?` here left the
+                // mapping in place for the life of the process: the caller gets
+                // an Err and drops the half-built segment, so nothing ever
+                // unmaps it and nothing unlinks the file. The failing path is
+                // exactly the ENOMEM one this fork cares about, so the leak
+                // landed precisely when address space and /dev/shm were already
+                // under pressure.
+                //
+                // SAFETY: `ptr`/`len` are the mapping `mmap` just returned, and
+                // no one else can hold it yet -- it has not left this function.
+                if let Err(unmap) = unsafe { munmap(ptr, len.get()) } {
+                    tracing::error!(
+                        "mlock failed ({e}) and unmapping the segment then failed too \
+                         ({unmap}): {len} bytes of address space are leaked for the life of \
+                         this process"
+                    );
+                }
+                return Err(e);
+            }
         }
 
         Ok(ptr)

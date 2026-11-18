@@ -28,7 +28,11 @@ use super::{
 use crate::api::provider::types::ZAllocError;
 
 #[dynamic(lazy, drop)]
-pub static mut GLOBAL_METADATA_STORAGE: MetadataStorage = MetadataStorage::new().unwrap();
+pub static mut GLOBAL_METADATA_STORAGE: MetadataStorage = MetadataStorage::new().expect(
+    "cannot allocate the SHM metadata segment, which no session can open without. The usual \
+     cause is RLIMIT_MEMLOCK: this segment is mlocked by its owner, so the limit must leave \
+     room for it ON TOP of the transport pool (BER-2171)",
+);
 
 pub struct MetadataStorage {
     available: Mutex<VecDeque<OwnedMetadataDescriptor>>,

@@ -786,6 +786,28 @@ impl RuntimeBuilder {
             runtime: std::sync::RwLock::new(WeakRuntime { state: Weak::new() }),
         });
 
+        // THE MANDATORY SHM SEGMENTS ARE TAKEN BEFORE THE OPTIONAL POOL
+        // (BER-2171).
+        //
+        // `init::init()` allocates the globals a session cannot do without --
+        // the metadata segment above all -- and each is `mlock`ed by its owner.
+        // Building the transport manager allocates the OPTIONAL transport pool,
+        // eagerly in `init` mode. Doing that first let a best-effort 16 MiB
+        // consume the locked-memory budget ahead of a mandatory 1.25 MiB, so a
+        // limit "sized for one pool" produced a failed open, or a panic, where
+        // lazy mode opened cleanly.
+        //
+        // Ordering it this way means a budget shortfall falls on the pool,
+        // which degrades to the network path by design, instead of on a segment
+        // whose absence is fatal.
+        #[cfg(feature = "shared-memory")]
+        let shm_init_mode = *config.transport.shared_memory.mode();
+        #[cfg(feature = "shared-memory")]
+        match shm_init_mode {
+            zenoh_config::ShmInitMode::Init => zenoh_shm::init::init(),
+            zenoh_config::ShmInitMode::Lazy => {}
+        };
+
         let transport_manager_builder = TransportManager::builder()
             .from_config(&config)
             .await?
@@ -812,10 +834,6 @@ impl RuntimeBuilder {
             .unwrap_or_else(|| load_plugins(&config));
         // Admin space creation flag
         let start_admin_space = *config.adminspace.enabled();
-        // SHM lazy init flag
-        #[cfg(feature = "shared-memory")]
-        let shm_init_mode = *config.transport.shared_memory.mode();
-
         let namespace = config.namespace().clone();
         let config = Notifier::new(config);
         let span = tracing::debug_span!("rt", zid = %zid.short());
@@ -858,11 +876,9 @@ impl RuntimeBuilder {
         #[cfg(feature = "plugins")]
         start_plugins(&runtime);
 
-        #[cfg(feature = "shared-memory")]
-        match shm_init_mode {
-            zenoh_config::ShmInitMode::Init => zenoh_shm::init::init(),
-            zenoh_config::ShmInitMode::Lazy => {}
-        };
+        // NOTE: the SHM subsystem was initialised BEFORE the transport manager,
+        // above, so the mandatory segments take their locked-memory budget
+        // ahead of the optional transport pool (BER-2171).
 
         Ok(runtime)
     }

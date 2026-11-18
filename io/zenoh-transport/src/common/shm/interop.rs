@@ -12,12 +12,10 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 use std::{
+    collections::BTreeMap,
     fmt::Debug,
     num::NonZeroUsize,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc, Mutex, OnceLock,
-    },
+    sync::{Arc, Mutex, OnceLock},
     time::Instant,
 };
 
@@ -25,7 +23,7 @@ use zenoh_buffers::{reader::HasReader, ZBuf, ZSlice, ZSliceKind};
 use zenoh_codec::{RCodec, Zenoh080};
 use zenoh_core::{zerror, zlock, Wait};
 use zenoh_protocol::{
-    core::Priority,
+    core::{Priority, ZenohIdProto},
     network::{NetworkBodyMut, NetworkMessageMut, Push, Request, Response},
     zenoh::{
         err::Err,
@@ -55,75 +53,102 @@ use crate::unicast::establishment::ext::shm::{
     segment::RXAuthSegment,
 };
 
-/// How often a discarded-message report may be emitted, however many are
-/// dropped in between. A failed map is a PER-MESSAGE event on the receive path,
-/// so an unconditional log is two defects at once: a malformed or oversized
-/// sender floods the log, and the flood is what makes a real line invisible.
+/// How often a discarded-message report may be emitted PER PEER, however many
+/// are dropped in between. A failed map is a per-message event on the receive
+/// path, so an unconditional log is two defects at once: a sender in this state
+/// floods the log, and the flood is what hides a real line.
 const SHM_RX_DROP_REPORT_EVERY_MS: u64 = 10_000;
 
-/// Total messages discarded because their shared-memory buffer could not be
-/// mapped, for the life of the process.
-static SHM_RX_DROPS: AtomicU64 = AtomicU64::new(0);
-/// The total as of the last report, so each report can state how many were lost
-/// since the previous one rather than only a running sum.
-static SHM_RX_DROPS_REPORTED: AtomicU64 = AtomicU64::new(0);
-/// When the last report was emitted, in ms since the first call.
-static SHM_RX_LAST_REPORT_MS: AtomicU64 = AtomicU64::new(0);
+/// What has been dropped for one peer, and when it was last reported.
+#[derive(Default)]
+struct ShmRxDropState {
+    total: u64,
+    reported: u64,
+    last_report_ms: u64,
+}
+
+/// Per-peer discard state.
+///
+/// KEYED BY PEER on purpose (BER-2172). A single process-wide limiter means a
+/// steady failure from one peer takes every report window, so a NEW and
+/// different failure from another peer is almost never the line that gets
+/// printed -- the limiter blends peers exactly as a shared counter blends the
+/// routine with the broken. Keyed this way, each peer's first discard is always
+/// reported.
+///
+/// Unbounded in principle; in practice a process has a handful of peers and
+/// each entry is three integers.
+static SHM_RX_DROPS: Mutex<BTreeMap<ZenohIdProto, ShmRxDropState>> = Mutex::new(BTreeMap::new());
+
+/// A peer's `(total, reported, last_report_ms)`, for tests only.
+#[cfg(test)]
+fn shm_rx_drop_state(peer: &ZenohIdProto) -> Option<(u64, u64, u64)> {
+    let drops = SHM_RX_DROPS.lock().unwrap_or_else(|e| e.into_inner());
+    drops
+        .get(peer)
+        .map(|s| (s.total, s.reported, s.last_report_ms))
+}
+
+/// Is this discard the one that gets reported?
+///
+/// Pure, so both directions are testable without capturing log output. The
+/// FIRST discard from a peer always reports: `last_report_ms` starts at zero,
+/// so a peer that fails in the process's first few seconds would otherwise stay
+/// silent for the whole window -- and the first one is the most informative,
+/// because it is closest to whatever changed.
+#[must_use]
+fn shm_rx_drop_should_report(total: u64, now_ms: u64, last_ms: u64) -> bool {
+    total == 1 || now_ms.saturating_sub(last_ms) >= SHM_RX_DROP_REPORT_EVERY_MS
+}
 
 fn shm_rx_now_ms() -> u64 {
     static START: OnceLock<Instant> = OnceLock::new();
     u64::try_from(START.get_or_init(Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-/// Is this discard the one that gets reported?
-///
-/// Pure, so both directions are testable without capturing log output. The
-/// FIRST discard always reports: `last_ms` starts at zero, so a process that
-/// drops a message in its first few seconds would otherwise stay silent for the
-/// whole window -- and the first one is the most informative, because it is the
-/// one closest to whatever changed.
-#[must_use]
-fn shm_rx_drop_should_report(total: u64, now_ms: u64, last_ms: u64) -> bool {
-    total == 1 || now_ms.saturating_sub(last_ms) >= SHM_RX_DROP_REPORT_EVERY_MS
-}
-
 /// Report a message DISCARDED because its shared-memory buffer could not be
-/// mapped, and count it.
+/// mapped, and count it against the peer it came from.
 ///
 /// This replaced a `tracing::debug!` that every service silenced, since they all
 /// run at `RUST_LOG=info`. The message is dropped either way -- that behaviour is
-/// deliberately unchanged here, because failing the transport instead would turn
-/// a lost payload into a dead link -- but it is no longer SILENT.
+/// deliberately unchanged, because failing the transport instead would turn a
+/// lost payload into a dead link -- but it is no longer SILENT.
 ///
 /// The loss is not symmetric across routes, which is why the text says so: a
-/// query shows up at the caller as a plain timeout, while a pub/sub route has no
-/// timeout at all and loses the payload with nothing to notice it.
-pub fn report_shm_rx_drop(e: &dyn core::fmt::Display) {
-    let total = SHM_RX_DROPS.fetch_add(1, Ordering::Relaxed) + 1;
+/// dropped REQUEST surfaces at the caller as a timeout, while a dropped REPLY
+/// does not -- the call completes normally with zero replies, which a reader
+/// cannot distinguish from an empty result. A pub/sub route has no timeout at
+/// all.
+pub fn report_shm_rx_drop(peer: ZenohIdProto, e: &dyn core::fmt::Display) {
+    let mut drops = match SHM_RX_DROPS.lock() {
+        Ok(drops) => drops,
+        // A poisoned lock means another thread panicked while reporting. Keep
+        // reporting rather than panicking again on the receive path.
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let state = drops.entry(peer).or_default();
+    state.total += 1;
     let now_ms = shm_rx_now_ms();
-    let last_ms = SHM_RX_LAST_REPORT_MS.load(Ordering::Relaxed);
-    if !shm_rx_drop_should_report(total, now_ms, last_ms) {
+    if !shm_rx_drop_should_report(state.total, now_ms, state.last_report_ms) {
         return;
     }
-    // Two RX threads can pass the check together and `swap` in either order, so
-    // the SECOND one to land may see a `previously` ABOVE its own `total`.
-    // `saturating_sub` is therefore load-bearing, not defensive: a plain
-    // subtraction wraps to ~1.8e19 in release and PANICS the RX thread wherever
-    // overflow checks are on. The visible cost of the race is a duplicate line
-    // and an understated delta on one of them, which is the right trade -- a
-    // missed report is worse than a repeated one.
-    SHM_RX_LAST_REPORT_MS.store(now_ms, Ordering::Relaxed);
-    let previously = SHM_RX_DROPS_REPORTED.swap(total, Ordering::Relaxed);
+    state.last_report_ms = now_ms;
+    let since_last = state.total.saturating_sub(state.reported);
+    state.reported = state.total;
+    let total = state.total;
+    drop(drops);
     tracing::error!(
+        %peer,
         total_dropped = total,
-        since_last_report = total.saturating_sub(previously),
+        since_last_report = since_last,
         "DISCARDED a message whose shared-memory buffer could not be mapped, and the \
          payload is LOST: {e}. A pub/sub route has no timeout and loses it silently. A \
          DROPPED REQUEST surfaces at the caller as a plain timeout; a dropped REPLY does \
          not -- the call completes normally with zero replies, which a reader cannot \
-         distinguish from an empty result. Note this counter is PROCESS-WIDE and names no \
-         peer, so a steady failure from one peer can crowd out the first report of \
-         another, and a burst shorter than the window is reported only in part"
+         distinguish from an empty result. Mounting a peer's pool does NOT lock it \
+         (BER-2170), so this is a segment that could not be opened, not a locked-memory \
+         limit. A burst shorter than the report window is counted in full but reported \
+         only in part"
     );
 }
 
@@ -756,6 +781,51 @@ pub fn map_zslice_to_shmbuf(zslice: &mut ZSlice, shmr: &ShmReader) -> ZResult<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **ONE PEER'S STEADY FAILURE MUST NOT SILENCE ANOTHER PEER'S FIRST
+    /// REPORT** (BER-2172).
+    ///
+    /// With a single process-wide limiter, a peer failing continuously took
+    /// every window, so a NEW failure from a DIFFERENT peer was almost never
+    /// the line that got printed -- the limiter blended peers the way a shared
+    /// counter blends the routine with the broken. Asserted on the per-peer
+    /// state rather than on log output, so it holds without capturing logs.
+    #[test]
+    fn a_steady_failure_from_one_peer_does_not_silence_another() {
+        let noisy = ZenohIdProto::rand();
+        let quiet = ZenohIdProto::rand();
+
+        // The noisy peer discards twice in quick succession. The FIRST is
+        // reported, the second is inside the window and is not.
+        report_shm_rx_drop(noisy, &"first");
+        let (total, reported, _) = shm_rx_drop_state(&noisy).expect("noisy peer not tracked");
+        assert_eq!(
+            (total, reported),
+            (1, 1),
+            "a peer's first discard must report"
+        );
+
+        report_shm_rx_drop(noisy, &"second");
+        let (total, reported, _) = shm_rx_drop_state(&noisy).expect("noisy peer not tracked");
+        assert_eq!(
+            (total, reported),
+            (2, 1),
+            "a second discard inside the window must be counted but not reported"
+        );
+
+        // THE POINT: a different peer's first discard is reported even though
+        // the window for the noisy one is still open.
+        report_shm_rx_drop(quiet, &"first from the other peer");
+        let (total, reported, _) = shm_rx_drop_state(&quiet).expect("quiet peer not tracked");
+        assert_eq!(
+            (total, reported),
+            (1, 1),
+            "another peer's first discard must report regardless of the noisy peer's window"
+        );
+
+        // And the peers' counts stay separate.
+        assert_eq!(shm_rx_drop_state(&noisy).map(|s| s.0), Some(2));
+    }
 
     /// **A DISCARDED MESSAGE IS REPORTED, AND THE RATE LIMIT CANNOT SILENCE THE
     /// FIRST ONE.**
