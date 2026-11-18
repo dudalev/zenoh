@@ -118,8 +118,7 @@ impl<ID: SegmentID> SegmentImpl<ID> {
         };
 
         // map segment into our address space
-        let data_ptr =
-            Self::map(len, fd, true).map_err(|e| SegmentCreateError::OsError(e as _))?;
+        let data_ptr = Self::map(len, fd, true).map_err(|e| SegmentCreateError::OsError(e as _))?;
 
         Ok(Self {
             lock_fd,
@@ -190,8 +189,7 @@ impl<ID: SegmentID> SegmentImpl<ID> {
         };
 
         // map segment into our address space
-        let data_ptr =
-            Self::map(len, fd, false).map_err(|e| SegmentOpenError::OsError(e as _))?;
+        let data_ptr = Self::map(len, fd, false).map_err(|e| SegmentOpenError::OsError(e as _))?;
 
         Ok(Self {
             lock_fd,

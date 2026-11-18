@@ -14,7 +14,7 @@
 
 use std::{collections::BTreeMap, num::NonZeroUsize, ops::Deref, sync::Arc};
 
-use zenoh_core::{bail, zerror, zread, zwrite};
+use zenoh_core::{bail, zerror, zlock, zread, zwrite};
 use zenoh_result::ZResult;
 
 use crate::{
@@ -52,20 +52,30 @@ impl ShmReader {
     /// `ensure_data_segment` is reached only from `read_shmbuf`, i.e. from a
     /// message that already carries a chunk descriptor -- so a receiver cannot
     /// learn a publisher's segment id, and therefore cannot map its pool, until
-    /// the first buffer arrives. Mapping `mlock`s the segment HERE, in the
-    /// receiver, so that first buffer is also the moment a receiver discovers it
-    /// has no locked-memory budget left for this publisher. The message is then
-    /// discarded, and the sender sees a timeout or nothing at all (BER-2167).
+    /// the first buffer arrives. Any failure to map it there is discovered at
+    /// that moment, and the message is discarded (BER-2167).
     ///
     /// This lets the establishment handshake mount the peer's pool while both
-    /// peers are known and a failure can still be attributed and refused
-    /// (BER-2170). It is idempotent: `ensure_data_segment` returns an
-    /// already-mounted segment from its map.
+    /// peers are known, so a failure is REPORTED against a known peer rather
+    /// than surfacing later as a dropped message. It is not refused: the link
+    /// stays up without shared memory from that peer.
+    ///
+    /// Mounting does NOT lock the segment -- only its owner does (BER-2170) --
+    /// so this is not a locked-memory cost. What it does cost is a mapping and
+    /// a shared flock held for the life of this process, because the reader's
+    /// segment map is insert-only.
+    ///
+    /// Idempotent: `ensure_data_segment` returns an already-mounted segment
+    /// from its map.
     ///
     /// Takes only `(protocol_id, segment)` because that is all the mount needs;
     /// the chunk id in a descriptor selects a buffer WITHIN a segment and is not
     /// required to attach one.
-    pub fn premount_segment(&self, protocol_id: ProtocolID, segment: SegmentID) -> ZResult<()> {
+    pub fn premount_segment(
+        &self,
+        protocol_id: ProtocolID,
+        segment: SegmentID,
+    ) -> ZResult<PremountedSegment> {
         self.ensure_data_segment(
             protocol_id,
             &ChunkDescriptor {
@@ -75,8 +85,13 @@ impl ShmReader {
                 chunk: 0,
                 len: NonZeroUsize::new(1).unwrap(),
             },
-        )
-        .map(|_| ())
+        )?;
+        let id = get_global_id(protocol_id, segment);
+        *zlock!(self.client_storage.premounts).entry(id).or_insert(0) += 1;
+        Ok(PremountedSegment {
+            storage: self.client_storage.clone(),
+            id,
+        })
     }
 
     pub fn read_shmbuf(&self, info: ShmBufInfo) -> ZResult<Arc<ShmBufInner>> {
@@ -181,6 +196,43 @@ unsafe impl<Inner: Send> Send for ClientStorage<Inner> {}
 /// Only immutable access to internal container is allowed,
 /// so we are Sync if the contained type is Sync
 unsafe impl<Inner: Sync> Sync for ClientStorage<Inner> {}
+
+/// A pre-mounted peer segment, held for as long as the link that asked for it.
+///
+/// Dropping it releases the mapping, and the shared flock that pins the
+/// segment's file, once no other link holds the same one (BER-2170). Without
+/// this a process keeps a mapping per peer it has ever handshaked with, and a
+/// restarted peer's 16 MiB pool stays in /dev/shm until every process that met
+/// it exits.
+///
+/// Releasing cannot invalidate a buffer in flight: `ShmBufInner` holds its own
+/// `Arc` on the segment, so a live buffer keeps it alive whatever the map says,
+/// and a later message simply mounts it again.
+#[zenoh_macros::unstable_doc]
+#[derive(Debug)]
+pub struct PremountedSegment {
+    storage: Arc<ShmClientStorage>,
+    id: GlobalDataSegmentId,
+}
+
+impl Drop for PremountedSegment {
+    fn drop(&mut self) {
+        // The two locks are taken in this order ONLY here and in
+        // `premount_segment`, and `ensure_data_segment` never takes
+        // `premounts`, so there is no path that takes them the other way round.
+        let mut premounts = zlock!(self.storage.premounts);
+        match premounts.get_mut(&self.id) {
+            Some(remaining) if *remaining > 1 => *remaining -= 1,
+            Some(_) => {
+                premounts.remove(&self.id);
+                zwrite!(self.storage.segments).remove(&self.id);
+            }
+            // Not tracked: nothing to release. Reachable only if a lease
+            // outlived its own bookkeeping, which no current path allows.
+            None => {}
+        }
+    }
+}
 
 pub(crate) type GlobalDataSegmentId = u64;
 fn get_global_id(protocol: ProtocolID, segment: SegmentID) -> GlobalDataSegmentId {

@@ -44,7 +44,7 @@ use zenoh_shm::{
             ConstBool, Defragment, GarbageCollect, JustAlloc, ShmProvider, ShmProviderBuilder,
         },
     },
-    reader::ShmReader,
+    reader::{PremountedSegment, ShmReader},
     ShmBufInfo, ShmBufInner,
 };
 
@@ -105,19 +105,25 @@ pub fn report_shm_rx_drop(e: &dyn core::fmt::Display) {
     if !shm_rx_drop_should_report(total, now_ms, last_ms) {
         return;
     }
-    // A benign race here costs at most a duplicate line, so the cheap ordering
-    // is deliberate: a missed report would be worse than a repeated one.
+    // Two RX threads can pass the check together and `swap` in either order, so
+    // the SECOND one to land may see a `previously` ABOVE its own `total`.
+    // `saturating_sub` is therefore load-bearing, not defensive: a plain
+    // subtraction wraps to ~1.8e19 in release and PANICS the RX thread wherever
+    // overflow checks are on. The visible cost of the race is a duplicate line
+    // and an understated delta on one of them, which is the right trade -- a
+    // missed report is worse than a repeated one.
     SHM_RX_LAST_REPORT_MS.store(now_ms, Ordering::Relaxed);
     let previously = SHM_RX_DROPS_REPORTED.swap(total, Ordering::Relaxed);
     tracing::error!(
         total_dropped = total,
-        since_last_report = total - previously,
+        since_last_report = total.saturating_sub(previously),
         "DISCARDED a message whose shared-memory buffer could not be mapped, and the \
-         payload is LOST: {e}. A query surfaces this as a plain timeout; a pub/sub route \
-         has no timeout and loses it silently. The usual cause is RLIMIT_MEMLOCK ON THIS \
-         RECEIVER: opening a sender's pool locks it HERE too, so a receiver needs one \
-         pool's budget for EVERY publisher it receives shared memory from, not one in \
-         total"
+         payload is LOST: {e}. A pub/sub route has no timeout and loses it silently. A \
+         DROPPED REQUEST surfaces at the caller as a plain timeout; a dropped REPLY does \
+         not -- the call completes normally with zero replies, which a reader cannot \
+         distinguish from an empty result. Note this counter is PROCESS-WIDE and names no \
+         peer, so a steady failure from one peer can crowd out the first report of \
+         another, and a burst shorter than the window is reported only in part"
     );
 }
 
@@ -319,17 +325,31 @@ impl LazyShmProvider {
 pub struct LinkShmHandoffConfig {
     pub rx: RxHandoffChannel,
     pub tx: TxHandoffChannel,
+    /// Peer pools this link pre-mounted at establishment (BER-2170).
+    ///
+    /// Held HERE because this config lives on the link, so the mappings and
+    /// their flocks are released exactly when the link goes away. Anywhere with
+    /// a longer life would reintroduce the accumulation the lease exists to
+    /// prevent, and `TransportShmConfig` -- the obvious alternative -- derives
+    /// `Clone` and `Eq`, which a lease cannot satisfy without making a clone
+    /// mean a second release.
+    pub premounted: Vec<PremountedSegment>,
 }
 
 impl LinkShmHandoffConfig {
-    pub fn new(rx: RxHandoffChannel, tx: TxHandoffChannel) -> Self {
-        Self { rx, tx }
+    pub fn new(
+        rx: RxHandoffChannel,
+        tx: TxHandoffChannel,
+        premounted: Vec<PremountedSegment>,
+    ) -> Self {
+        Self { rx, tx, premounted }
     }
 
     pub fn new_disabled() -> Self {
         Self {
             rx: RxHandoffChannel::Disabled,
             tx: TxHandoffChannel::new_disabled(),
+            premounted: Vec::new(),
         }
     }
 }

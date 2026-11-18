@@ -631,22 +631,18 @@ pub(crate) async fn open_link(
         #[cfg(feature = "transport_multilink")]
         ext_mlink: manager.state.unicast.multilink.fsm(&manager.prng),
         #[cfg(feature = "shared-memory")]
-        ext_shm: manager
-            .state
-            .shm_context
-            .as_ref()
-            .map(|ctx| {
-                // Advertise our pool and mount the peer's at establishment,
-                // rather than on the first buffer referencing it (BER-2170).
-                // `data_segment_id` is Some only once the provider exists,
-                // which eager initialisation guarantees here (BER-2169).
-                ext::shm::auth::ShmFsm::new(&ctx.auth).with_data_segment_exchange(
-                    ctx.shm_provider
-                        .as_ref()
-                        .and_then(|provider| provider.data_segment_id()),
-                    ctx.shm_reader.clone(),
-                )
-            }),
+        ext_shm: manager.state.shm_context.as_ref().map(|ctx| {
+            // Advertise our pool and mount the peer's at establishment,
+            // rather than on the first buffer referencing it (BER-2170).
+            // `data_segment_id` is Some only once the provider exists,
+            // which eager initialisation guarantees here (BER-2169).
+            ext::shm::auth::ShmFsm::new(&ctx.auth).with_data_segment_exchange(
+                ctx.shm_provider
+                    .as_ref()
+                    .and_then(|provider| provider.data_segment_id()),
+                ctx.shm_reader.clone(),
+            )
+        }),
         #[cfg(feature = "transport_auth")]
         ext_auth: manager.state.unicast.authenticator.fsm(&manager.prng),
         ext_lowlatency: ext::lowlatency::LowLatencyFsm::new(),

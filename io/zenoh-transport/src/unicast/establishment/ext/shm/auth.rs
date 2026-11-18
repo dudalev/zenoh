@@ -15,7 +15,7 @@ use std::{
     ops::Deref,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
 };
 
@@ -26,7 +26,7 @@ use zenoh_buffers::{
     writer::{DidntWrite, HasWriter, Writer},
 };
 use zenoh_codec::{RCodec, WCodec, Zenoh080};
-use zenoh_core::bail;
+use zenoh_core::{bail, zlock};
 use zenoh_crypto::PseudoRng;
 use zenoh_protocol::{
     core::Reliability,
@@ -35,7 +35,7 @@ use zenoh_protocol::{
 use zenoh_result::{zerror, Error as ZError, ZResult};
 use zenoh_shm::{
     api::common::types::{ProtocolID, SegmentID},
-    reader::ShmReader,
+    reader::{PremountedSegment, ShmReader},
 };
 
 use crate::{
@@ -126,7 +126,11 @@ const EXT_DATA_SEGMENT_TAG: u8 = 1;
 /// knows and returns, without checking that the buffer is exhausted, so these
 /// bytes are ignored rather than fatal. That is what makes this safe to deploy
 /// to one host at a time.
-fn write_data_segment<W>(codec: Zenoh080, writer: &mut W, id: Option<SegmentID>) -> Result<(), DidntWrite>
+fn write_data_segment<W>(
+    codec: Zenoh080,
+    writer: &mut W,
+    id: Option<SegmentID>,
+) -> Result<(), DidntWrite>
 where
     W: Writer,
 {
@@ -447,6 +451,15 @@ pub(crate) struct ShmFsm<'a> {
     /// The reader the peer's pool is mounted into. `None` leaves the peer's
     /// pool to be mounted on the first buffer, which is the old behaviour.
     reader: Option<ShmReader>,
+    /// The pool the peer advertised, stashed until the peer has PROVEN itself.
+    ///
+    /// The acceptor learns this in `InitSyn`, which is before any challenge has
+    /// been answered -- so acting on it there would mount an id supplied by an
+    /// unauthenticated peer. It is used in `recv_open_syn` instead.
+    peer_data_segment: std::sync::OnceLock<SegmentID>,
+    /// Leases for the pools we mounted, handed to the link so they are released
+    /// when it closes (BER-2170).
+    premounted: Mutex<Vec<PremountedSegment>>,
     // Set when the acceptor's InitAck carried an SHM extension, whatever became of it.
     acceptor_offered_shm: AtomicBool,
     tx_lease: std::sync::OnceLock<TxHandoffChannel>,
@@ -460,6 +473,8 @@ impl<'a> ShmFsm<'a> {
             inner,
             our_data_segment: None,
             reader: None,
+            peer_data_segment: std::sync::OnceLock::new(),
+            premounted: Mutex::new(Vec::new()),
             acceptor_offered_shm: AtomicBool::new(false),
             tx_lease: std::sync::OnceLock::new(),
             rx_segment: std::sync::OnceLock::new(),
@@ -493,17 +508,23 @@ impl<'a> ShmFsm<'a> {
             return;
         };
         for protocol in reader.supported_protocols() {
-            if let Err(e) = reader.premount_segment(protocol, segment) {
-                tracing::error!(
-                    segment,
-                    protocol,
-                    "{} could not mount the peer's shared-memory pool at establishment: {}. \
-                     Shared memory from this peer will be DROPPED rather than received, one \
-                     message at a time (BER-2167). The usual cause is this process's \
-                     RLIMIT_MEMLOCK",
-                    s,
-                    e
-                );
+            match reader.premount_segment(protocol, segment) {
+                Ok(lease) => zlock!(self.premounted).push(lease),
+                Err(e) => {
+                    tracing::error!(
+                        segment,
+                        protocol,
+                        "{} could not mount the peer's shared-memory pool at establishment: \
+                         {}. Shared memory from this peer will be DROPPED rather than \
+                         received, one message at a time (BER-2167). The link itself is \
+                         unaffected. Mounting a peer's pool does NOT lock it (BER-2170), so \
+                         this is a segment that could not be opened -- a stale or \
+                         already-unlinked id, or a permission problem -- and not a \
+                         locked-memory limit",
+                        s,
+                        e
+                    );
+                }
             }
         }
     }
@@ -511,6 +532,10 @@ impl<'a> ShmFsm<'a> {
     pub fn shm_init_result(self) -> (Option<TransportShmConfig>, LinkShmHandoffConfig) {
         // Opening the peer's auth segment is only the first negotiation step.
         // Enable SHM only after both directions of the handshake have completed.
+        let premounted = self
+            .premounted
+            .into_inner()
+            .unwrap_or_else(|e| e.into_inner());
         match (
             self.rx_segment.into_inner(),
             self.rx_lease.into_inner(),
@@ -518,7 +543,11 @@ impl<'a> ShmFsm<'a> {
         ) {
             (Some(segment), Some(rx), Some(tx)) => (
                 Some(TransportShmConfig::new(segment)),
-                LinkShmHandoffConfig::new(rx, tx),
+                // The leases move to the link, so the pools it mounted are
+                // released when it closes (BER-2170). On any other outcome they
+                // drop with `self` here, which releases them immediately --
+                // correct, because no link was established to use them.
+                LinkShmHandoffConfig::new(rx, tx, premounted),
             ),
             _ => (None, LinkShmHandoffConfig::new_disabled()),
         }
@@ -772,9 +801,13 @@ impl<'a> AcceptFsm for &'a ShmFsm<'a> {
             .set(Arc::new(alice_segment))
             .map_err(|_| zerror!("{} State machine error", S))?;
 
-        // Alice's auth segment has opened, so Alice is real: mount her pool now
-        // rather than on the first buffer that references it (BER-2170).
-        self.premount_peer_pool(init_syn.alice_data_segment, S);
+        // Alice has NOT proven anything yet -- her auth segment merely exists,
+        // and the challenge is answered in OpenSyn. Mounting a peer-supplied id
+        // here would let an unauthenticated peer pin any segment this process
+        // can open. Stash it and mount once she has answered.
+        if let Some(segment) = init_syn.alice_data_segment {
+            let _ = self.peer_data_segment.set(segment);
+        }
 
         Ok(())
     }
@@ -837,6 +870,10 @@ impl<'a> AcceptFsm for &'a ShmFsm<'a> {
         if !self.inner.validate(open_syn.bob_challenge, S) {
             bail!("{} Challenge mismatch: refusing the SHM proposal", S);
         }
+
+        // Alice answered the challenge, so her pool may now be mounted
+        // (BER-2170). This is the acceptor's first safe point to do it.
+        self.premount_peer_pool(self.peer_data_segment.get().copied(), S);
 
         // Allocate RX counter for this session
         let rx_handoff = RxHandoffChannel::new_rx(segment, open_syn.alice_counters)

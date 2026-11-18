@@ -14,8 +14,9 @@
 
 use std::{
     collections::BTreeMap,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
 };
+use zenoh_core::zread;
 
 use static_init::dynamic;
 use zenoh_result::{bail, ZResult};
@@ -130,6 +131,21 @@ impl ShmClientStorageBuilder {
 pub struct ShmClientStorage {
     pub(crate) clients: ClientStorage<Arc<dyn ShmClient>>,
     pub(crate) segments: RwLock<BTreeMap<GlobalDataSegmentId, Arc<dyn ShmSegment>>>,
+    /// How many live PRE-MOUNTS hold each segment (BER-2170).
+    ///
+    /// `segments` is insert-only by design: a segment mounted because a buffer
+    /// referenced it stays for the life of the process, which is right, because
+    /// another buffer may reference it at any time.
+    ///
+    /// A PRE-MOUNT is different. It is taken on behalf of ONE link, before any
+    /// buffer exists, so it must be released when that link goes away -- or a
+    /// process accumulates a mapping and a shared flock for every peer it has
+    /// ever handshaked with, and a restarted peer's pool is pinned in /dev/shm
+    /// until every process that met it exits.
+    ///
+    /// Counted rather than a plain set because several links may pre-mount the
+    /// same peer segment, and the last one out is the one that may release it.
+    pub(crate) premounts: Mutex<BTreeMap<GlobalDataSegmentId, usize>>,
 }
 
 impl Eq for ShmClientStorage {}
@@ -153,10 +169,21 @@ impl ShmClientStorage {
         self.clients.get_clients().keys().copied().collect()
     }
 
+    /// How many peer segments are currently mounted.
+    ///
+    /// Exists so a test can observe that a pre-mount lease actually releases
+    /// its mapping (BER-2170); the count is not otherwise meaningful, because a
+    /// lazily mounted segment is never released.
+    #[zenoh_macros::unstable_doc]
+    pub fn mounted_segment_count(&self) -> usize {
+        zread!(self.segments).len()
+    }
+
     fn new(clients: BTreeMap<ProtocolID, Arc<dyn ShmClient>>) -> Self {
         Self {
             clients: ClientStorage::new(clients),
             segments: RwLock::default(),
+            premounts: Mutex::default(),
         }
     }
 }
