@@ -42,10 +42,22 @@ impl AllocatedMetadataDescriptor {
 
 impl Drop for AllocatedMetadataDescriptor {
     fn drop(&mut self) {
-        GLOBAL_VALIDATOR.read().remove(self.descriptor.clone());
-        GLOBAL_METADATA_STORAGE
-            .read()
-            .reclaim(self.descriptor.clone());
+        // This drop may run inside the static drop callstack, so the statics may
+        // already be FINALIZED and `.read()` would PANIC -- exactly the hazard
+        // `Segment::drop` guards against in posix_shm/segment.rs, which this
+        // mirrors. Every live buffer drops at process exit, so this is the site
+        // that fires in bulk.
+        //
+        // Skipping is correct rather than a silencing: a validator that has been
+        // torn down has nothing left to remove, and reclaiming a slot in a
+        // storage that is itself being dropped changes nothing. The two are
+        // guarded separately because they finalize independently.
+        if let Ok(validator) = GLOBAL_VALIDATOR.try_read() {
+            validator.remove(self.descriptor.clone());
+        }
+        if let Ok(storage) = GLOBAL_METADATA_STORAGE.try_read() {
+            storage.reclaim(self.descriptor.clone());
+        }
     }
 }
 

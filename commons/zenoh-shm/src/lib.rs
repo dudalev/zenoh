@@ -62,6 +62,8 @@ pub mod metadata;
 pub mod posix_shm;
 pub mod reader;
 pub mod shm;
+#[macro_use]
+mod statics;
 pub mod version;
 pub mod watchdog;
 

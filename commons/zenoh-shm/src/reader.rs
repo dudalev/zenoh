@@ -25,6 +25,7 @@ use crate::{
         provider::chunk::ChunkDescriptor,
     },
     metadata::subscription::GLOBAL_METADATA_SUBSCRIPTION,
+    statics::try_live_read,
     watchdog::confirmator::GLOBAL_CONFIRMATOR,
     ShmBufInfo, ShmBufInner,
 };
@@ -98,9 +99,19 @@ impl ShmReader {
         // Read does not increment the reference count as it is assumed
         // that the sender of this buffer has incremented it for us.
 
-        let metadata = GLOBAL_METADATA_SUBSCRIPTION.read().link(&info.metadata)?;
+        // A receive thread can still be mapping buffers while the process exits,
+        // by which point these statics may be FINALIZED. `.read()` PANICS there,
+        // which turns a deliberate non-zero exit into a double fault whose
+        // backtrace points here instead of at the real reason for the exit.
+        // Failing the map is the honest outcome: the message cannot be read, and
+        // the caller already handles that.
+        let metadata = try_live_read!(GLOBAL_METADATA_SUBSCRIPTION)
+            .map_err(|e| zerror!("SHM metadata subscription unavailable: {e}"))?
+            .link(&info.metadata)?;
         // attach to the watchdog before doing other things
-        let confirmed_metadata = GLOBAL_CONFIRMATOR.read().add(metadata);
+        let confirmed_metadata = try_live_read!(GLOBAL_CONFIRMATOR)
+            .map_err(|e| zerror!("SHM confirmator unavailable: {e}"))?
+            .add(metadata);
 
         // retrieve data descriptor from metadata
         let data_descriptor = confirmed_metadata.owned.header().data_descriptor();

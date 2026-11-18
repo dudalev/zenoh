@@ -43,6 +43,7 @@ use crate::{
         allocated_descriptor::AllocatedMetadataDescriptor, descriptor::MetadataDescriptor,
         storage::GLOBAL_METADATA_STORAGE,
     },
+    statics::try_live_read,
     watchdog::{
         confirmator::{ConfirmedDescriptor, GLOBAL_CONFIRMATOR},
         validator::GLOBAL_VALIDATOR,
@@ -968,11 +969,20 @@ where
 
     fn alloc_resources() -> Result<(AllocatedMetadataDescriptor, ConfirmedDescriptor), ZAllocError>
     {
+        // Same shutdown hazard as the read path: a publisher can allocate while
+        // the process is exiting and these statics are FINALIZED, where `.read()`
+        // PANICS. An allocation that cannot acquire its metadata is an allocation
+        // failure, which this signature already expresses.
+        //
         // allocate metadata
-        let allocated_metadata = GLOBAL_METADATA_STORAGE.read().allocate()?;
+        let allocated_metadata = try_live_read!(GLOBAL_METADATA_STORAGE)
+            .map_err(|_| ZAllocError::Other)?
+            .allocate()?;
 
         // add watchdog to confirmator
-        let confirmed_metadata = GLOBAL_CONFIRMATOR.read().add(allocated_metadata.clone());
+        let confirmed_metadata = try_live_read!(GLOBAL_CONFIRMATOR)
+            .map_err(|_| ZAllocError::Other)?
+            .add(allocated_metadata.clone());
 
         Ok((allocated_metadata, confirmed_metadata))
     }

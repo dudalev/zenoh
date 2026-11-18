@@ -17,7 +17,7 @@ use std::{fmt::Debug, num::NonZeroUsize};
 use rand::Rng;
 use zenoh_result::{bail, ZResult};
 
-use crate::{cleanup::CLEANUP, shm};
+use crate::{cleanup::CLEANUP, shm, statics::try_live_read};
 
 const SEGMENT_DEDICATE_TRIES: usize = 100;
 
@@ -74,8 +74,19 @@ where
             // the creation attempt will be repeated with another id
             match shm::Segment::create(id, len) {
                 Ok(shmem) => {
-                    // Register cleanup routine to make sure Segment will be unlinked on exit
-                    CLEANUP.read().register_cleanup(id);
+                    // Register cleanup routine to make sure Segment will be unlinked on exit.
+                    // `try_read` for the same reason as `Segment::drop` below: if
+                    // CLEANUP has finalized there is no exit registry left to join,
+                    // and the orphan sweep reclaims the file on a later run. A panic
+                    // here would be strictly worse than a late reclaim.
+                    if let Ok(cleanup) = try_live_read!(CLEANUP) {
+                        cleanup.register_cleanup(id);
+                    } else {
+                        tracing::debug!(
+                            "SHM cleanup registry finalized; segment {id} will be \
+                             reclaimed by the orphan sweep instead of at exit"
+                        );
+                    }
 
                     tracing::debug!("Created SHM segment, len: {len}, id: {id}");
                     return Ok(Segment { shmem });
@@ -102,8 +113,16 @@ where
             }
         };
 
-        // Register cleanup routine to make sure Segment will be unlinked on exit
-        CLEANUP.read().register_cleanup(id);
+        // Register cleanup routine to make sure Segment will be unlinked on exit.
+        // See `create` above for why this is `try_read`.
+        if let Ok(cleanup) = try_live_read!(CLEANUP) {
+            cleanup.register_cleanup(id);
+        } else {
+            tracing::debug!(
+                "SHM cleanup registry finalized; segment {id} will be reclaimed by \
+                 the orphan sweep instead of at exit"
+            );
+        }
 
         tracing::debug!("Opened SHM segment, id: {id}");
 
