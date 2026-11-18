@@ -19,6 +19,7 @@ use std::{
         atomic::{AtomicU32, Ordering::SeqCst},
         Arc,
     },
+    time::{Duration, Instant},
 };
 
 use zenoh_buffers::{
@@ -137,9 +138,36 @@ impl ShmTransportMetadataSegment {
     }
 }
 
+/// How recently a counter must have been released for its reuse to be worth
+/// REPORTING (BER-2173).
+///
+/// A TX counter is decremented by the REMOTE peer, through shared memory, using
+/// the index we gave it at establishment. So when our link closes and the lease
+/// is released, the peer may still be decrementing that index until its own
+/// teardown catches up. Reissuing it at once -- which `push_front` did, making
+/// reuse LIFO and therefore immediate -- let a departing peer corrupt the
+/// counter of a link that had just reset it to zero.
+///
+/// FIFO reuse is what fixes that, and it is not a marginal improvement: there
+/// are 2810 counters per segment, so an index now returns only after every
+/// other free index has been handed out. Reuse within a teardown skew requires
+/// thousands of intervening leases in a few seconds.
+///
+/// This threshold is therefore a REPORTING one, not a gate. Gating would mean
+/// refusing a lease, which turns a narrow race into a link that cannot use
+/// shared memory at all -- a worse failure, and a visible one. So the lease is
+/// always granted and the implausible case is made loud instead of silent. A
+/// true guarantee needs a generation beside each counter, which changes the
+/// shared segment layout and so the peer protocol.
+const COUNTER_REUSE_REPORT_WINDOW: Duration = Duration::from_secs(5);
+
 pub struct TXAuthSegment {
     segment: ShmTransportMetadataSegment,
-    available_shm_counters: Arc<std::sync::Mutex<VecDeque<ShmCounterID>>>,
+    /// Free counter indices with the instant each was released, oldest first.
+    ///
+    /// `None` for an index that has never been leased, so a fresh segment hands
+    /// out all of its counters without waiting.
+    available_shm_counters: Arc<std::sync::Mutex<VecDeque<(ShmCounterID, Option<Instant>)>>>,
 }
 
 impl std::fmt::Debug for TXAuthSegment {
@@ -159,7 +187,7 @@ impl TXAuthSegment {
         let segment = ShmTransportMetadataSegment::create(challenge, shm_protocols)?;
         let available_shm_counters = Arc::new(std::sync::Mutex::new(
             (0..segment.data.shm_counters.len())
-                .map(|index| index as ShmCounterID)
+                .map(|index| (index as ShmCounterID, None))
                 .collect(),
         ));
 
@@ -167,6 +195,15 @@ impl TXAuthSegment {
             segment,
             available_shm_counters,
         })
+    }
+
+    /// How many handoff counters this segment holds.
+    ///
+    /// Exists so a test can walk the whole pool and assert that a released
+    /// index returns to the BACK of the queue (BER-2173).
+    #[cfg(test)]
+    pub fn counter_capacity(&self) -> usize {
+        self.segment.data.shm_counters.len()
     }
 
     pub fn validate(&self, expected_challenge: AuthChallenge, s: &str) -> bool {
@@ -186,17 +223,34 @@ pub struct ShmTXCounterLease {
 
 impl ShmTXCounterLease {
     pub fn new(segment: Arc<TXAuthSegment>) -> ZResult<Self> {
-        let index = zlock!(segment.available_shm_counters).pop_front();
-        index
-            .map(|counter_index| {
-                // Reset counter to 0 when lease is created
-                segment.segment.data.counter(counter_index).store(0, SeqCst);
-                Self {
-                    segment,
+        // The queue is oldest-first, so the front is the index that has been out
+        // of use longest -- which is the one least likely to still be touched by
+        // a departed peer.
+        let taken = zlock!(segment.available_shm_counters).pop_front();
+        let Some((counter_index, released_at)) = taken else {
+            return Err(zerror!("No available SHM counters").into());
+        };
+
+        if let Some(at) = released_at {
+            let since = at.elapsed();
+            if since < COUNTER_REUSE_REPORT_WINDOW {
+                tracing::warn!(
                     counter_index,
-                }
-            })
-            .ok_or_else(|| zerror!("No available SHM counters").into())
+                    since_ms = since.as_millis(),
+                    "reusing an SHM handoff counter released very recently, after every other \
+                     counter in the segment: the peer that held it may still be decrementing \
+                     it through shared memory, which would corrupt this link's count \
+                     (BER-2173)"
+                );
+            }
+        }
+
+        // Reset counter to 0 when lease is created
+        segment.segment.data.counter(counter_index).store(0, SeqCst);
+        Ok(Self {
+            segment,
+            counter_index,
+        })
     }
 
     pub fn id(&self) -> ShmCounterID {
@@ -230,7 +284,12 @@ impl ShmTXCounterLease {
 
 impl Drop for ShmTXCounterLease {
     fn drop(&mut self) {
-        zlock!(self.segment.available_shm_counters).push_front(self.counter_index);
+        // push_BACK, so reuse is FIFO: an index goes to the end of the queue and
+        // every other free index is handed out before it comes round again.
+        // `push_front` made reuse immediate, which is the worst possible order
+        // for a counter a departing peer may still be touching (BER-2173).
+        zlock!(self.segment.available_shm_counters)
+            .push_back((self.counter_index, Some(Instant::now())));
     }
 }
 
@@ -339,5 +398,72 @@ where
             }),
             counter_index,
         })
+    }
+}
+
+#[cfg(test)]
+mod counter_reuse_tests {
+    use zenoh_shm::api::protocol_implementations::posix::protocol_id::POSIX_PROTOCOL_ID;
+
+    use super::{ShmTXCounterLease, TXAuthSegment};
+
+    fn segment() -> std::sync::Arc<TXAuthSegment> {
+        std::sync::Arc::new(
+            TXAuthSegment::create(0x1234_5678, &[POSIX_PROTOCOL_ID]).expect("cannot create"),
+        )
+    }
+
+    /// **A RELEASED COUNTER IS NOT HANDED STRAIGHT BACK OUT** (BER-2173).
+    ///
+    /// A TX counter is decremented by the REMOTE peer through shared memory,
+    /// using the index we gave it at establishment. `push_front` made reuse
+    /// LIFO, so the very next link got the index a departing peer might still
+    /// be touching -- and the new lease resets it to zero, so the corruption is
+    /// silent and unbounded.
+    #[test]
+    fn a_released_counter_is_not_reissued_immediately() {
+        let segment = segment();
+
+        let first = ShmTXCounterLease::new(segment.clone()).expect("cannot lease");
+        let first_index = first.id();
+        drop(first);
+
+        let second = ShmTXCounterLease::new(segment.clone()).expect("cannot lease again");
+        assert_ne!(
+            second.id(),
+            first_index,
+            "a counter released a moment ago must not be the next one handed out: the peer \
+             that held it may still be decrementing it"
+        );
+    }
+
+    /// THE CONTROL: the released index is RETURNED to the pool, not leaked.
+    ///
+    /// Without this, a change that simply dropped released counters on the floor
+    /// would satisfy the test above while slowly exhausting the segment -- a
+    /// quieter failure than the race it replaces.
+    #[test]
+    fn a_released_counter_comes_back_within_one_cycle() {
+        let segment = segment();
+        let total = segment.counter_capacity();
+
+        let first = ShmTXCounterLease::new(segment.clone()).expect("cannot lease");
+        let first_index = first.id();
+        drop(first);
+
+        // Walk the whole pool. The released index must appear, and because reuse
+        // is FIFO it must be the LAST one -- every other free index is handed out
+        // before it comes round.
+        let mut leases = Vec::with_capacity(total);
+        for _ in 0..total {
+            leases.push(ShmTXCounterLease::new(segment.clone()).expect("pool exhausted early"));
+        }
+
+        assert_eq!(
+            leases.last().map(ShmTXCounterLease::id),
+            Some(first_index),
+            "the released counter must return to the BACK of the queue, and so be the last \
+             of a full cycle"
+        );
     }
 }
