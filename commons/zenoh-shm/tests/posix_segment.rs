@@ -114,19 +114,23 @@ fn segment_open_error() {
     let _opened_segment = Segment::open(id).expect_err("must fail: opened not existing segment!");
 }
 
-/// `Locked:` for the mapping containing `addr`, in kB, as the kernel reports it
-/// per VMA in `/proc/self/smaps`.
+/// `(Size, Locked)` in kB for the mapping containing `addr`, as the kernel
+/// reports them per VMA in `/proc/self/smaps`.
 ///
 /// PER MAPPING on purpose. The obvious instrument is `VmLck` from
 /// `/proc/self/status`, and it is the wrong one: it is a PROCESS-WIDE total, so
-/// the sibling tests in this binary -- which create and drop their own locked
-/// segments concurrently -- move it between any two readings. A test built on it
-/// is not measuring its own subject.
+/// the sibling tests in this binary move it between any two readings.
+///
+/// `Size` comes back as well as `Locked` so a test can prove it is looking at
+/// the right VMA. Without it, an assertion that `Locked` is zero would also
+/// pass against a reader that found some unrelated mapping, which is the one
+/// way this measurement can go blind.
 #[cfg(target_os = "linux")]
-fn locked_kb_at(addr: *const u8) -> u64 {
+fn mapping_size_and_locked_kb(addr: *const u8) -> (u64, u64) {
     let addr = addr as u64;
     let smaps = std::fs::read_to_string("/proc/self/smaps").expect("cannot read /proc/self/smaps");
     let mut inside = false;
+    let mut size = None;
     for line in smaps.lines() {
         let first = line.split_whitespace().next().unwrap_or_default();
         // A mapping header starts with "<lo>-<hi>"; every other line is a field
@@ -137,56 +141,66 @@ fn locked_kb_at(addr: *const u8) -> u64 {
                 continue;
             }
         }
-        if inside {
-            if let Some(rest) = line.strip_prefix("Locked:") {
-                return rest
-                    .split_whitespace()
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .expect("malformed Locked: line");
-            }
+        if !inside {
+            continue;
+        }
+        let field = |p: &str| {
+            line.strip_prefix(p)
+                .and_then(|r| r.split_whitespace().next())
+                .and_then(|v| v.parse::<u64>().ok())
+        };
+        if let Some(v) = field("Size:") {
+            size = Some(v);
+        }
+        if let Some(locked) = field("Locked:") {
+            return (size.expect("Size: precedes Locked: in smaps"), locked);
         }
     }
     panic!("no mapping in /proc/self/smaps contains {addr:#x}");
 }
 
-/// **OPENING SOMEONE ELSE'S SEGMENT MUST NOT LOCK IT, WHILE CREATING ONE
-/// MUST** (BER-2170).
+/// **NO SHM MAPPING IS LOCKED, ON EITHER PATH** (operator ruling 2026-11-18,
+/// BER-2170).
 ///
-/// `RLIMIT_MEMLOCK` is per process, so a reader that locked every publisher's
-/// pool was charged once per publisher for memory it does not own -- and a
-/// limit sized for one pool became a limit for one publisher. Past that the
-/// open fails, the message carrying the buffer is discarded, and the sender
-/// sees a timeout or nothing (BER-2167).
+/// This test previously asserted the OPPOSITE for `create`: that the owner
+/// locks its own pool. It is INVERTED rather than deleted, because the old
+/// assertion recorded the old intent and the change is deliberate -- upstream
+/// `mlock`ed every mapping, and that one call produced every locked-memory
+/// failure this fork has chased: fan-in exhausting `RLIMIT_MEMLOCK`, messages
+/// discarded in silence, a `systemd --user` limit that cannot be raised from a
+/// unit, and a band where session open panicked instead of degrading.
 ///
-/// The pages do not need the second lock: both mappings are `MAP_SHARED` over
-/// the same tmpfs object, so the creator's lock has already made those physical
-/// pages unswappable.
-///
-/// Linux-only because it reads `/proc`. The property is the same on every unix,
-/// and `unix.rs` is shared, so the Linux assertion covers the change.
+/// The residual is a possible page fault on first touch under real memory
+/// pressure, which is a latency event rather than a correctness one.
 #[cfg(target_os = "linux")]
 #[test]
-fn opening_a_foreign_segment_does_not_lock_it_but_creating_one_does() {
+fn no_shm_mapping_is_locked_whether_created_or_opened() {
     let elem_count = (4 * 1024 * 1024_usize).try_into().unwrap();
     let created: Segment<u8> = Segment::create(elem_count).expect("error creating new segment");
     let opened = Segment::open(created.id()).expect("error opening existing segment!");
 
-    let created_locked = locked_kb_at(created.as_ptr());
-    let opened_locked = locked_kb_at(opened.as_ptr());
+    let (created_size, created_locked) = mapping_size_and_locked_kb(created.as_ptr());
+    let (opened_size, opened_locked) = mapping_size_and_locked_kb(opened.as_ptr());
 
-    // THE CONTROL, and the half that makes the other half mean anything: the
-    // OWNER still locks. Without it, a build where mlock never happened at all
-    // would satisfy the assertion below.
+    // THE CONTROL: both readings must have found a mapping of about the right
+    // size. Without it, "Locked is 0" would also hold for a reader that landed
+    // on some unrelated VMA, and the test would be blind rather than passing.
     assert!(
-        created_locked >= 4096,
-        "the creator must lock its own pool: its mapping reports {created_locked} kB locked"
+        created_size >= 4096,
+        "the created mapping should be about 4 MiB, not {created_size} kB -- wrong VMA"
+    );
+    assert!(
+        opened_size >= 4096,
+        "the opened mapping should be about 4 MiB, not {opened_size} kB -- wrong VMA"
     );
 
     assert_eq!(
+        created_locked, 0,
+        "creating a segment must not lock it ({created_locked} kB locked)"
+    );
+    assert_eq!(
         opened_locked, 0,
-        "opening a segment must not lock it (its mapping reports {opened_locked} kB locked): a \
-         reader charged a pool per publisher runs out of budget by fan-in alone"
+        "opening a segment must not lock it ({opened_locked} kB locked)"
     );
 
     drop(opened);

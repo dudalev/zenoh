@@ -27,7 +27,7 @@ use nix::fcntl::open;
 use nix::{
     fcntl::OFlag,
     sys::{
-        mman::{mlock, mmap, munmap, shm_open, shm_unlink, MapFlags, ProtFlags},
+        mman::{mmap, munmap, shm_open, shm_unlink, MapFlags, ProtFlags},
         stat::{fstat, Mode},
     },
     unistd::ftruncate,
@@ -118,7 +118,7 @@ impl<ID: SegmentID> SegmentImpl<ID> {
         };
 
         // map segment into our address space
-        let data_ptr = Self::map(len, fd, true).map_err(|e| SegmentCreateError::OsError(e as _))?;
+        let data_ptr = Self::map(len, fd).map_err(|e| SegmentCreateError::OsError(e as _))?;
 
         Ok(Self {
             lock_fd,
@@ -189,7 +189,7 @@ impl<ID: SegmentID> SegmentImpl<ID> {
         };
 
         // map segment into our address space
-        let data_ptr = Self::map(len, fd, false).map_err(|e| SegmentOpenError::OsError(e as _))?;
+        let data_ptr = Self::map(len, fd).map_err(|e| SegmentOpenError::OsError(e as _))?;
 
         Ok(Self {
             lock_fd,
@@ -272,30 +272,32 @@ impl<ID: SegmentID> SegmentImpl<ID> {
         format!("{id}.zenoh")
     }
 
-    /// `mmap` the segment, and `mlock` it only when this process OWNS it.
+    /// `mmap` the segment. NOTHING IS LOCKED (operator ruling 2026-11-18,
+    /// BER-2170).
     ///
-    /// The owner locks, so the pool cannot be paged out from under the data
-    /// path. A process that merely OPENS someone else's segment does not
-    /// (BER-2170), for two reasons:
+    /// Upstream `mlock`ed every mapping, on both the create and the open path,
+    /// and that single call is what produced every locked-memory failure this
+    /// fork has chased: a reader charged one pool per publisher it received
+    /// from, `RLIMIT_MEMLOCK` exhausted by fan-in, messages silently discarded,
+    /// a `systemd --user` limit that cannot be raised from a unit, and a band
+    /// where session open panicked rather than degraded.
     ///
-    /// * The pages are already pinned. Both sides map the same tmpfs object
-    ///   with `MAP_SHARED`, so they share physical pages and the creator's
-    ///   `mlock` has already made them unswappable. A second `mlock` from a
-    ///   reader changes no page's residency.
-    /// * `RLIMIT_MEMLOCK` is PER PROCESS, so that second lock charges a reader
-    ///   for memory it does not own, once per publisher it receives from. A
-    ///   limit sized for one pool is then a limit for one publisher, and the
-    ///   budget is exhausted by fan-in rather than by any real demand. Past
-    ///   that point `open` fails, the message carrying the buffer is discarded,
-    ///   and the sender sees a timeout or nothing at all -- which is BER-2167,
-    ///   and is what killed the paper harnesses on giedi and sanafir.
+    /// WHAT THE LOCK BOUGHT, and why it is not wanted here. `/dev/shm` is tmpfs
+    /// and tmpfs pages are swappable, so without a lock a pool can in principle
+    /// be paged out and a read then blocks on swap I/O. That is a real cost on a
+    /// host under memory pressure. These hosts are not: the operator has ruled
+    /// it unnecessary, having measured swap essentially unused on the trading
+    /// hosts, and the pages are in the page cache either way.
     ///
-    /// The residual: if the OWNER exits while a reader still holds the mapping,
-    /// those pages stop being locked by anyone and could be evicted. A reader
-    /// still reading a dead publisher's pool is already a degenerate case, and
-    /// a page fault there is a far better outcome than refusing to receive from
-    /// a live one.
-    fn map(len: NonZeroUsize, fd: &OwnedFd, lock: bool) -> nix::Result<NonNull<c_void>> {
+    /// THE RESIDUAL, stated rather than hidden: under genuine memory pressure a
+    /// first touch of an shm page may now fault. That is a latency event, not a
+    /// correctness one, and it replaces a failure mode that refused to receive
+    /// messages at all.
+    ///
+    /// Nothing in zenoh-shm depends on a mapping being locked -- there is no
+    /// `munlock` anywhere, and the only consumer of the guarantee was the
+    /// pre-fault it happened to provide.
+    fn map(len: NonZeroUsize, fd: &OwnedFd) -> nix::Result<NonNull<c_void>> {
         let prot = ProtFlags::PROT_READ | ProtFlags::PROT_WRITE;
         #[cfg(target_os = "linux")]
         let flags = MapFlags::MAP_SHARED | MapFlags::MAP_NORESERVE;
@@ -310,31 +312,6 @@ impl<ID: SegmentID> SegmentImpl<ID> {
         );
         // SAFETY: this is safe as we are not using any unsafe flags and FD is correct
         let ptr = unsafe { mmap(None, len, prot, flags, fd, 0) }?;
-
-        if lock {
-            tracing::trace!("mlock(addr={:?}, length={})", ptr, len,);
-            // SAFETY: this is safe as ptr produced by shm_open/mmap is page-aligned
-            if let Err(e) = unsafe { mlock(ptr, len.get()) } {
-                // UNMAP BEFORE RETURNING (BER-2173). A bare `?` here left the
-                // mapping in place for the life of the process: the caller gets
-                // an Err and drops the half-built segment, so nothing ever
-                // unmaps it and nothing unlinks the file. The failing path is
-                // exactly the ENOMEM one this fork cares about, so the leak
-                // landed precisely when address space and /dev/shm were already
-                // under pressure.
-                //
-                // SAFETY: `ptr`/`len` are the mapping `mmap` just returned, and
-                // no one else can hold it yet -- it has not left this function.
-                if let Err(unmap) = unsafe { munmap(ptr, len.get()) } {
-                    tracing::error!(
-                        "mlock failed ({e}) and unmapping the segment then failed too \
-                         ({unmap}): {len} bytes of address space are leaked for the life of \
-                         this process"
-                    );
-                }
-                return Err(e);
-            }
-        }
 
         Ok(ptr)
     }
