@@ -958,6 +958,14 @@ impl TransportManager {
     }
 
     pub(crate) async fn handle_new_link_unicast(&self, link: LinkUnicast) {
+        // A closing manager, or a process that has begun to exit, runs no accept handshake:
+        // it would admit nothing, and at exit the handshake reads statics that are already
+        // finalized (BER-2230, BER-2456).
+        if self.is_closed() {
+            tracing::debug!("{} Closed: refusing link {}", self.zid(), link);
+            let _ = link.close().await;
+            return;
+        }
         let incoming_counter = self.state.unicast.incoming.clone();
         if incoming_counter.load(SeqCst) >= self.config.unicast.accept_pending {
             // We reached the limit of concurrent incoming transport, this means two things:

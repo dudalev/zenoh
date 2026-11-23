@@ -746,9 +746,10 @@ impl TransportManager {
 
     /// Whether [`TransportManager::close`] has begun, or the process has begun to exit.
     ///
-    /// Once either has, no new unicast transport is admitted, and the receive paths deliver
-    /// nothing and so map no shared-memory buffer: zenoh-shm's statics are finalized at
-    /// process exit, where every map fails.
+    /// Once either has, no accept handshake starts, no new unicast transport is admitted,
+    /// and the receive paths deliver nothing and so map no shared-memory buffer: zenoh-shm's
+    /// statics are finalized at process exit, where every map fails. Exit is seen on unix
+    /// only, once a manager with shared memory enabled has been built in the process.
     pub fn is_closed(&self) -> bool {
         #[cfg(feature = "shared-memory")]
         if crate::common::exit::has_begun() {
