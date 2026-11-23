@@ -1589,6 +1589,54 @@ mod tests {
             );
         }
 
+        /// **A CLOSED RUNTIME REPORTS NO PEER AS CONNECTED THROUGH `connect_peer`**, not even
+        /// one it still has a transport to, which is where process exit leaves it (BER-2456).
+        /// For a peer already connected `connect_peer` never reaches `connect`, so its own
+        /// check is the only one that refuses.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_closed_manager_reports_no_peer_connected_through_connect_peer() {
+            let peer_zid = ZenohIdProto::rand();
+            let peer = zenoh_transport::TransportManager::builder()
+                .whatami(WhatAmI::Peer)
+                .zid(peer_zid)
+                .build_test(std::sync::Arc::new(
+                    zenoh_transport::DummyTransportEventHandler,
+                ))
+                .unwrap();
+            let locator = peer
+                .add_listener("tcp/127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
+            let runtime = RuntimeBuilder::new(Config::default())
+                .build()
+                .await
+                .unwrap();
+            assert!(
+                runtime.connect(&peer_zid, &[locator.clone()]).await,
+                "an open runtime must connect to the peer"
+            );
+
+            // THE CONTROL: open, a peer the runtime has a transport to is connected.
+            assert!(runtime.connect_peer(&peer_zid, &[locator.clone()]).await);
+
+            runtime.manager().mark_closed_for_test();
+            assert!(
+                runtime
+                    .manager()
+                    .get_transport_unicast(&peer_zid)
+                    .await
+                    .is_some(),
+                "the transport must still be open, or `connect_peer` reaches `connect`"
+            );
+            assert!(
+                !runtime.connect_peer(&peer_zid, &[locator]).await,
+                "a runtime whose transport manager is closed must report no peer as connected"
+            );
+
+            runtime.manager().close().await;
+            peer.close().await;
+        }
+
         /// **THE SAME THROUGH `connect_peer`**, which is how a gossip re-dial reaches it.
         #[tokio::test(flavor = "multi_thread")]
         async fn a_closed_manager_dials_no_peer_through_connect_peer() {

@@ -11,7 +11,10 @@
 // Contributors:
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use zenoh_config::Config;
 use zenoh_core::zlock;
@@ -791,6 +794,142 @@ fn test_response_wireexpr() {
     let we = primitives1.get_last_key().unwrap();
     assert_eq!(we.suffix, "test/queryable/reply/1");
     assert_eq!(we.scope, 0);
+}
+
+/// Records the final replies a face is sent.
+#[derive(Default)]
+struct FinalReplies(std::sync::Mutex<Vec<u32>>);
+
+impl FinalReplies {
+    fn rids(&self) -> Vec<u32> {
+        let mut rids = zlock!(self.0).clone();
+        rids.sort_unstable();
+        rids
+    }
+}
+
+impl EPrimitives for FinalReplies {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn send_interest(&self, _ctx: RoutingContext<&mut zenoh_protocol::network::Interest>) -> bool {
+        false
+    }
+
+    fn send_declare(&self, _ctx: RoutingContext<&mut Declare>) -> bool {
+        false
+    }
+
+    fn send_push(&self, _msg: &mut Push, _reliability: Reliability) -> bool {
+        false
+    }
+
+    fn send_request(&self, _msg: &mut Request) -> bool {
+        false
+    }
+
+    fn send_response(&self, _msg: &mut Response) -> bool {
+        false
+    }
+
+    fn send_response_final(&self, msg: &mut zenoh_protocol::network::ResponseFinal) -> bool {
+        zlock!(self.0).push(msg.rid);
+        false
+    }
+}
+
+fn query(rid: u32) -> Request {
+    Request {
+        id: rid,
+        wire_expr: "test/face_close/query".into(),
+        payload: RequestBody::Query(zenoh_protocol::zenoh::query::Query::default()),
+        ext_qos: zenoh_protocol::network::request::ext::QoSType::default(),
+        ext_tstamp: None,
+        ext_nodeid: NodeIdType::DEFAULT,
+        ext_target: QueryTarget::All,
+        ext_budget: None,
+        ext_timeout: None,
+        ext_ts_stack: None,
+    }
+}
+
+/// **A QUERY ROUTED TO A FACE THAT HAS BEGUN TO CLOSE IS FINALIZED WHEN IT CLOSES**
+/// (BER-2457), as is one routed to it before.
+///
+/// Until the face leaves the routes, under the tables' write lock, a query routed to it is
+/// pending there. `send_close` finalizes the face's pending queries after that, so such a query
+/// gets its final reply; finalized before, it would wait out its timeout. The test holds the
+/// control lock, which `send_close` takes after it has begun and before it touches the routes,
+/// and routes a query to the face while `send_close` waits for it.
+#[test]
+fn a_query_routed_to_a_face_while_it_closes_is_finalized() {
+    let router = new_router();
+    let tables = router.tables.clone();
+    let silent = Arc::new(ClientPrimitives::new());
+    let queryable_face = router.new_session(silent.clone());
+    let finals = Arc::new(FinalReplies::default());
+    let querier = router.new_session(finals.clone());
+
+    queryable_face.declare_queryable(
+        0,
+        &"test/face_close/**".into(),
+        &QueryableInfoType {
+            complete: true,
+            distance: 1,
+        },
+        NodeId::default(),
+        &mut |p, m| {
+            m.with_mut(|m| {
+                p.send_declare(m);
+            })
+        },
+    );
+
+    querier.route_query(&mut query(1));
+    assert!(
+        silent.get_last_name().is_some(),
+        "the first query must reach the queryable's face"
+    );
+
+    let ctrl_lock = zlock!(tables.ctrl_lock);
+    let closing = std::thread::spawn({
+        let face = queryable_face.clone();
+        move || face.send_close()
+    });
+    // `send_close` has begun once it has terminated the face's tasks, and then waits for the
+    // control lock. Pending queries finalized before that lock would answer the first query
+    // now, so they are given the time to.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !queryable_face
+        .state
+        .task_controller
+        .get_cancellation_token()
+        .is_cancelled()
+    {
+        assert!(Instant::now() < deadline, "`send_close` must begin");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let early = Instant::now() + Duration::from_millis(200);
+    while finals.rids().is_empty() && Instant::now() < early {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    silent.clear_data();
+    querier.route_query(&mut query(2));
+    assert!(
+        silent.get_last_name().is_some(),
+        "the second query must reach the closing face, or this test is not about one"
+    );
+
+    drop(ctrl_lock);
+    closing.join().unwrap();
+    assert_eq!(
+        finals.rids(),
+        vec![1, 2],
+        "every query routed to the face before it left the routes must be finalized when it \
+         closes"
+    );
 }
 
 #[test]

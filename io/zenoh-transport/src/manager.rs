@@ -758,6 +758,14 @@ impl TransportManager {
         self.state.closed.load(Ordering::Acquire)
     }
 
+    /// Marks this manager closed and closes nothing, for tests: the state process exit
+    /// leaves a manager in, where [`TransportManager::is_closed`] holds while its transports
+    /// are still open.
+    #[cfg(feature = "test")]
+    pub fn mark_closed_for_test(&self) {
+        self.state.closed.store(true, Ordering::Release);
+    }
+
     /*************************************/
     /*              LISTENER             */
     /*************************************/
