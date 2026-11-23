@@ -211,6 +211,91 @@ impl Net {
     }
 }
 
+/// LOCAL PATCH: how many times the routers of a net are opened on new ports when one of the
+/// ports was taken before its router could bind it.
+const OPEN_ROUTERS_ATTEMPTS: usize = 5;
+
+/// LOCAL PATCH: a net, per router: its id, and each neighbour's id with the weight of the link
+/// to it, if one is set.
+type NetSpec = [(u16, Vec<(u16, Option<u16>)>)];
+
+/// Opens one router per entry of `net`, each listening on a port picked free and connecting to
+/// its neighbours' ports.
+///
+/// LOCAL PATCH: a port picked free is only bound when its router opens, so another test in this
+/// binary can take it in between, and that router then fails with "Address already in use"
+/// (review F6). The routers opened so far are then closed, and all are opened again on new ports.
+async fn open_routers(net: &NetSpec) -> (Vec<Session>, HashMap<u16, u16>) {
+    for attempt in 1..=OPEN_ROUTERS_ATTEMPTS {
+        let mut router_ports = HashMap::new();
+        for (id, _) in net {
+            let mut port = get_free_tcp_port();
+            while router_ports.values().any(|p| *p == port) {
+                port = get_free_tcp_port();
+            }
+            router_ports.insert(*id, port);
+        }
+
+        let mut routers = Vec::new();
+        let mut taken = None;
+        for v in net {
+            let zid = ZenohId::from_str(&v.0.to_string()).unwrap();
+            let connect =
+                v.1.iter()
+                    .map(|(id, _)| {
+                        *router_ports
+                            .get(id)
+                            .unwrap_or_else(|| panic!("Missing port for router {id}"))
+                    })
+                    .collect::<Vec<_>>();
+            let listen_port = *router_ports
+                .get(&v.0)
+                .unwrap_or_else(|| panic!("Missing port for router {}", v.0));
+            let mut config =
+                get_basic_router_config(&[listen_port], &connect, WhatAmI::Router).await;
+            config.set_id(Some(zid)).unwrap();
+            let weights =
+                v.1.iter()
+                    .filter_map(|(e, w)| {
+                        w.map(|w| TransportWeight {
+                            dst_zid: ZenohId::from_str(&e.to_string()).unwrap(),
+                            weight: w.try_into().unwrap(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+            config
+                .routing
+                .router
+                .linkstate
+                .set_transport_weights(weights)
+                .unwrap();
+
+            match ztimeout!(open(config)) {
+                Ok(router) => routers.push(router),
+                Err(e)
+                    if attempt < OPEN_ROUTERS_ATTEMPTS
+                        && e.to_string().contains("Address already in use") =>
+                {
+                    taken = Some(e);
+                    break;
+                }
+                Err(e) => panic!("Cannot open router {}: {e}", v.0),
+            }
+        }
+
+        match taken {
+            None => return (routers, router_ports),
+            Some(e) => {
+                println!("Attempt {attempt}: {e}; opening the routers again on new ports");
+                for router in routers {
+                    ztimeout!(router.close()).unwrap();
+                }
+            }
+        }
+    }
+    unreachable!("the last attempt returns or panics")
+}
+
 #[allow(clippy::type_complexity)]
 async fn create_routers_net(
     net: Vec<(u16, Vec<(u16, Option<u16>)>)>,
@@ -247,51 +332,7 @@ async fn create_net(
             lk.insert(zid, Box::new(f.clone()));
         }
     }
-    let mut routers = Vec::new();
-    let mut router_ports = HashMap::new();
-
-    for (id, _) in &net {
-        let mut port = get_free_tcp_port();
-        while router_ports.values().any(|p| *p == port) {
-            port = get_free_tcp_port();
-        }
-        router_ports.insert(*id, port);
-    }
-
-    for v in &net {
-        let zid = ZenohId::from_str(&v.0.to_string()).unwrap();
-        let connect =
-            v.1.iter()
-                .map(|(id, _)| {
-                    *router_ports
-                        .get(id)
-                        .unwrap_or_else(|| panic!("Missing port for router {id}"))
-                })
-                .collect::<Vec<_>>();
-        let listen_port = *router_ports
-            .get(&v.0)
-            .unwrap_or_else(|| panic!("Missing port for router {}", v.0));
-        let mut config = get_basic_router_config(&[listen_port], &connect, WhatAmI::Router).await;
-        config.set_id(Some(zid)).unwrap();
-        let weights =
-            v.1.iter()
-                .filter_map(|(e, w)| {
-                    w.map(|w| TransportWeight {
-                        dst_zid: ZenohId::from_str(&e.to_string()).unwrap(),
-                        weight: w.try_into().unwrap(),
-                    })
-                })
-                .collect::<Vec<_>>();
-        config
-            .routing
-            .router
-            .linkstate
-            .set_transport_weights(weights)
-            .unwrap();
-
-        let router = ztimeout!(open(config)).unwrap();
-        routers.push(router);
-    }
+    let (routers, router_ports) = open_routers(&net).await;
 
     let mut config_client_a = get_basic_client_config(
         *router_ports
