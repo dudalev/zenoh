@@ -46,7 +46,8 @@ impl TransportUnicastUniversal {
         #[cfg(feature = "stats")] stats: &zenoh_stats::LinkStats,
         #[cfg(feature = "shared-memory")] link: &TransportLinkUnicastRx,
     ) -> ZResult<()> {
-        // A closing manager delivers nothing and maps nothing (BER-2230).
+        // A closing manager, or a process that has begun to exit, delivers nothing and maps
+        // nothing (BER-2230, BER-2456).
         if self.manager.is_closed() {
             return Ok(());
         }
@@ -57,6 +58,10 @@ impl TransportUnicastUniversal {
         );
         #[cfg(feature = "shared-memory")]
         if let Some(shm_context) = &self.shm_context {
+            // Exit waits for this map, and refuses it once begun (BER-2456).
+            let Some(_exit) = crate::common::exit::hold() else {
+                return Ok(());
+            };
             if let Err(e) = crate::common::shm::interop::map_zmsg_to_shmbuf(
                 msg.as_mut(),
                 &shm_context.shm_reader,

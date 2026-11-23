@@ -5576,6 +5576,7 @@ dependencies = [
  "flume",
  "futures",
  "lazy_static",
+ "libc",
  "lockfree",
  "lz4_flex",
  "quinn",

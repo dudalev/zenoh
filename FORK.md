@@ -50,8 +50,9 @@ yet at the commit that introduced the table.
   Nothing `mlock`s a mapping, so locked memory does not limit shared memory at all. A read
   of zenoh-shm's statics after process exit has finalized them fails instead of panicking.
   A transport manager that has begun to close admits no new unicast transport and delivers
-  nothing, so a closing session maps no shared-memory buffer. And zenohd builds with shared
-  memory by default.
+  nothing, so a closing session maps no shared-memory buffer; so does a process that has begun
+  to exit with its session open, and the exit waits for the maps already in flight. And zenohd
+  builds with shared memory by default.
 * **One upstream fix carried**, [#2862](https://github.com/eclipse-zenoh/zenoh/pull/2862),
   under two criteria: it has a test that fails here, and it is reachable by what we run. That
   PR is OPEN and unreviewed upstream -- it is not accepted code.

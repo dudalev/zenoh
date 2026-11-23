@@ -17,4 +17,6 @@ pub(crate) mod pipeline;
 pub(crate) mod priority;
 pub(crate) mod seq_num;
 #[cfg(feature = "shared-memory")]
+pub(crate) mod exit;
+#[cfg(feature = "shared-memory")]
 pub mod shm;

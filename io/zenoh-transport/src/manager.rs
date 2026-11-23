@@ -487,6 +487,11 @@ impl TransportManagerBuilder {
 
         #[cfg(feature = "shared-memory")]
         let shm_context = ShmContext::new(self.shm, self.shm_reader)?;
+        // A map must not overlap the finalization of zenoh-shm's statics at exit (BER-2456).
+        #[cfg(feature = "shared-memory")]
+        if shm_context.is_some() {
+            crate::common::exit::register();
+        }
 
         let unicast = self.unicast.build(&mut prng)?;
         let multicast = self.multicast.build()?;
@@ -739,12 +744,16 @@ impl TransportManager {
         self.task_controller.terminate_all_async().await;
     }
 
-    /// Whether [`TransportManager::close`] has begun.
+    /// Whether [`TransportManager::close`] has begun, or the process has begun to exit.
     ///
-    /// Once it has, no new unicast transport is admitted, and the receive paths deliver
+    /// Once either has, no new unicast transport is admitted, and the receive paths deliver
     /// nothing and so map no shared-memory buffer: zenoh-shm's statics are finalized at
     /// process exit, where every map fails.
     pub fn is_closed(&self) -> bool {
+        #[cfg(feature = "shared-memory")]
+        if crate::common::exit::has_begun() {
+            return true;
+        }
         self.state.closed.load(Ordering::Acquire)
     }
 
