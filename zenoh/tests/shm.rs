@@ -69,9 +69,18 @@ async fn setup_shm_unicast<const NO_SHM_FOR_SECOND_PEER: bool>(
     (peer01, peer02)
 }
 
+/// The interface the multicast tests join their group on: loopback, so that the host's
+/// firewall and routes cannot decide the outcome, unless `ZENOH_TEST_MULTICAST_IFACE` names
+/// another, by name or by address. Without one, the link picks the first non-loopback
+/// multicast interface (BER-2458).
+fn multicast_iface() -> String {
+    std::env::var("ZENOH_TEST_MULTICAST_IFACE").unwrap_or_else(|_| "127.0.0.1".to_string())
+}
+
 async fn setup_shm_multicast(test_context: &mut TestSessions) -> (Session, Session) {
     // Open 1st listener with port 0
-    let mut config = test_context.get_listener_config("udp/224.0.0.1:0", 1);
+    let mut config = test_context
+        .get_listener_config(&format!("udp/224.0.0.1:0#iface={}", multicast_iface()), 1);
     config
         .transport
         .shared_memory
@@ -89,8 +98,9 @@ async fn setup_shm_multicast(test_context: &mut TestSessions) -> (Session, Sessi
         .expect("Expected at least one UDP locator")
         .to_string();
 
-    // Open 2nd listener with port got from 1st listener
-    let mut config = test_context.get_listener_config(&locator, 1);
+    // Open 2nd listener with port got from 1st listener, on the same interface
+    let mut config =
+        test_context.get_listener_config(&format!("{locator}#iface={}", multicast_iface()), 1);
     config
         .transport
         .shared_memory

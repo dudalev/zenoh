@@ -152,6 +152,12 @@ mapping was `mlock`ed and the default transport pool is 16 MiB, more than a typi
 nor shrinking `transport/shared_memory/transport_optimization/pool_size` is needed to run them,
 and an ENOMEM from a segment says nothing about the limit.
 
+**The multicast tests join their group on loopback** (`#iface=127.0.0.1`): left to choose, the
+udp link takes the first non-loopback multicast interface, and on a host whose firewall drops
+multicast there they cannot pass at all (BER-2458). To run them over a real interface, name it,
+or its address, in `ZENOH_TEST_MULTICAST_IFACE`. It applies to `zenoh/tests/shm.rs` and
+`io/zenoh-transport/tests/shm_rx_after_close_multicast.rs`.
+
 Run everything, including the gated targets, with:
 
 ```bash
