@@ -18,6 +18,9 @@
 //! `TransportManager::close` drains its transport table before closing what it drained,
 //! so a transport admitted after the drain would never be closed and would outlive
 //! `close`.
+//!
+//! The peer whose dial is refused is healthy, so it logs no ERROR. What it logs is read
+//! from its own span: every test in this binary logs through [`init_log`].
 #![cfg(all(feature = "test", feature = "transport_tcp"))]
 
 use std::{
@@ -25,7 +28,7 @@ use std::{
     net::SocketAddr,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -35,6 +38,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     sync::Notify,
 };
+use tracing::Instrument;
 use zenoh_core::ztimeout;
 use zenoh_link::Link;
 use zenoh_protocol::{
@@ -50,6 +54,58 @@ use zenoh_transport::{
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 const POLL: Duration = Duration::from_millis(10);
+/// The span a dialling peer's handshake runs in, with a `test` field naming its test.
+const DIALLER: &str = "dialler";
+/// Logged at ERROR in the dialler's span, so that its log is known to reach the test.
+const PROBE: &str = "the dialler's log reaches the test";
+
+/// Every WARN and ERROR event of this binary, each with the fields of its spans.
+static LOGGED: Mutex<Vec<zenoh_util::LogRecord>> = Mutex::new(Vec::new());
+
+/// Logs WARN and above to stderr and into [`LOGGED`].
+fn init_log() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        zenoh_util::init_log_with_callback(
+            |meta| {
+                if meta.is_span() {
+                    meta.name() == DIALLER
+                } else {
+                    *meta.level() <= tracing::Level::WARN
+                }
+            },
+            |record| {
+                eprintln!(
+                    "{} {}: {}",
+                    record.level,
+                    record.target,
+                    record.message.as_deref().unwrap_or_default()
+                );
+                LOGGED
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(record);
+            },
+        );
+    });
+}
+
+/// The ERROR events logged in the span of the dialler whose `test` field is `test`.
+fn dialler_errors(test: u8) -> Vec<String> {
+    LOGGED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|record| record.level == tracing::Level::ERROR)
+        .filter(|record| {
+            record
+                .attributes
+                .iter()
+                .any(|(name, value)| *name == "test" && *value == test.to_string())
+        })
+        .map(|record| record.message.clone().unwrap_or_default())
+        .collect()
+}
 
 /// Counts the transports a manager admitted: `new_unicast` is how one is announced.
 #[derive(Default)]
@@ -192,7 +248,7 @@ async fn read_batch(from: &mut tokio::net::tcp::OwnedReadHalf) -> Vec<u8> {
 
 /// A link the manager dials itself, as a re-dial during close would.
 async fn dial(close_first: bool, first_zid: u8) {
-    zenoh_util::init_log_from_env_or("error");
+    init_log();
     let port = get_free_tcp_port();
     let (peer, _) = manager(first_zid);
     ztimeout!(peer.add_listener(endpoint(port))).unwrap();
@@ -222,7 +278,7 @@ async fn dial(close_first: bool, first_zid: u8) {
 
 /// A link whose accept was in flight when the acceptor began to close.
 async fn held_accept(close: bool, first_zid: u8) {
-    zenoh_util::init_log_from_env_or("error");
+    init_log();
     let port = get_free_tcp_port();
     let (acceptor, acceptor_admissions) = manager(first_zid);
     ztimeout!(acceptor.add_listener(endpoint(port))).unwrap();
@@ -232,7 +288,11 @@ async fn held_accept(close: bool, first_zid: u8) {
     let proxy_endpoint = proxy.endpoint();
     let opening = tokio::spawn({
         let opener = opener.clone();
-        async move { opener.open_transport_unicast(proxy_endpoint).await }
+        async move {
+            tracing::error!("{PROBE}");
+            opener.open_transport_unicast(proxy_endpoint).await
+        }
+        .instrument(tracing::error_span!(DIALLER, test = first_zid))
     });
     wait_until("the acceptor to wait for the OpenSyn", || proxy.holding()).await;
 
@@ -255,6 +315,17 @@ async fn held_accept(close: bool, first_zid: u8) {
 
     proxy.release();
     let opened = ztimeout!(opening).unwrap();
+    let logged = dialler_errors(first_zid);
+    assert!(
+        logged.iter().any(|message| message == PROBE),
+        "the dialler's log must reach this test, or the absence below proves nothing: \
+         {logged:?}"
+    );
+    assert!(
+        logged.iter().all(|message| message == PROBE),
+        "the dialler is healthy and must log no ERROR, refused or not: {logged:?}; it was \
+         told {opened:?}"
+    );
 
     if let Some(closing) = closing {
         ztimeout!(closing).unwrap();

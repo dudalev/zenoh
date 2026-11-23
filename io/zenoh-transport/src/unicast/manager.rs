@@ -807,13 +807,16 @@ impl TransportManager {
                     config.zid
                 );
                 tracing::debug!("{e}");
+                // With no Close frame. A peer that dialled this manager waits for its OpenAck,
+                // and a Close in its place makes it log at ERROR (`establishment/open.rs`);
+                // the link dropping reads as a peer that has gone. A peer this manager dialled
+                // has admitted the transport, and closes it when the link drops.
                 let (l, asl) = link.fail();
-                Err(InitTransportError::Link(Box::new((
-                    e.into(),
-                    l,
-                    asl,
-                    close::reason::GENERIC,
-                ))))
+                let _ = l.close(None).await;
+                if let Some(asl) = asl {
+                    let _ = asl.close(None).await;
+                }
+                return Err(e.into());
             } else {
                 match guard.get(&config.zid) {
                     Some(transport) => {
