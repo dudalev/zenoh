@@ -63,6 +63,10 @@ yet at the commit that introduced the table.
 * **The regression gates**, `zenoh/tests/expr_id_rollover.rs` and
   `zenoh/tests/keyexpr_desync_*`. They assert on what ARRIVED, not on zenoh's log text, so
   rewording a diagnostic cannot blind them.
+* **The consumer's features are zenoh defaults.** `shared-memory` and `unstable` join
+  `transport_tcp` in `zenoh`'s `default`, so zenoh's default build, on its own or as a
+  dependency, has the code the consumer runs. The consumer itself still names them, with
+  `default-features = false`.
 * **Test-suite scope.** Upstream targets exercising features this fork's consumer does not use
   are gated behind `upstream_only_tests`, and a few single tests are `#[ignore]`d with their
   reason. Nothing is deleted.
