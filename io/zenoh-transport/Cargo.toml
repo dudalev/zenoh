@@ -112,9 +112,9 @@ zenoh-util = { workspace = true }
 
 # LOCAL PATCH: see `upstream_only_tests` in [features].
 #
-# Multicast transport. Every shipped config of this fork's consumer sets
-# `scouting/multicast/enabled = false` and connects over TCP on loopback, so no multicast
-# transport is ever opened.
+# Multicast transport. A multicast transport runs only over a udp link, and this fork's
+# consumer builds zenoh with `transport_tcp` as its only transport, so it never opens one.
+# It uses multicast only to SCOUT, on the loopback interface.
 [[test]]
 name = "multicast_transport"
 path = "tests/multicast_transport.rs"

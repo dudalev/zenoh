@@ -42,6 +42,16 @@ yet at the commit that introduced the table.
   rather than guarded: a resource left in a router hat's set without its context, the runtime
   stripping the resource tree while hats still held `Arc<Resource>`, and a closing face
   leaving its context on resources that outlive it.
+* **Shared memory: a receive path that reports what it drops, and stops when it closes.** A
+  receiver that cannot map a buffer reports the loss at ERROR, rate-limited per peer, where
+  upstream discarded it at DEBUG. In `init` mode the transport's own pool is built at
+  session open, and peers exchange pool ids at establishment, so a receiver mounts a
+  sender's pool before any message needs it and releases the mount when the link closes.
+  Nothing `mlock`s a mapping, so locked memory does not limit shared memory at all. A read
+  of zenoh-shm's statics after process exit has finalized them fails instead of panicking.
+  A transport manager that has begun to close admits no new unicast transport and delivers
+  nothing, so a closing session maps no shared-memory buffer. And zenohd builds with shared
+  memory by default.
 * **One upstream fix carried**, [#2862](https://github.com/eclipse-zenoh/zenoh/pull/2862),
   under two criteria: it has a test that fails here, and it is reachable by what we run. That
   PR is OPEN and unreviewed upstream -- it is not accepted code.
@@ -79,9 +89,11 @@ DEFAULT-feature `cargo build -p zenoh` used to emit five warnings, over six item
 methods) that are feature-dependent dead code present at tag 1.10.2. The carrying project
 sets `build.warnings = "deny"`, so those warnings failed the build outright. Each is now
 either gated to exactly its users' condition or allowed with a comment naming which feature
-uses it, so every configuration builds clean -- including the one the consumer actually uses,
+uses it, so every configuration builds clean -- including
 `--no-default-features --features transport_tcp,shared-memory`, which did NOT build until a
-dead import was gated: every verification run before that had `unstable` on.
+dead import was gated: every verification run before that had `unstable` on. The consumer
+itself pins `zenoh` with `transport_tcp`, `shared-memory` and `unstable` (its root
+`Cargo.toml`), so build that set as well as the one without `unstable`.
 
 **`--exclude zenoh-uring`.** Its `reader` stress test does not terminate: measured at roughly
 1500% CPU for 8 m 54 s with 3 of its 18 tests finished, and killed by hand. No CODE of ours
@@ -96,7 +108,7 @@ in this fork's changes reaches it" (as this said) is not true.
 | `cargo test` (plain) | 1, after gating the class below | **green**, 782 passed / 0 failed / 102 ignored |
 | `cargo test` (plain), before that gating | 6, two campaigns | 4 green at 880 / 0 / 54; 2 red |
 | the full-feature command above | 1 | green, 152 binaries, 977 passed / 0 failed / 79 ignored |
-| `--no-default-features -F transport_tcp,shared-memory` (the consumer's set) | 1 | builds clean |
+| `--no-default-features -F transport_tcp,shared-memory` (the consumer's set then; it has since added `unstable`) | 1 | builds clean |
 
 Each red run failed exactly ONE test, and a DIFFERENT one each time:
 
@@ -131,20 +143,14 @@ with their reason and exactly ONE was made to pass -- and both of its faults wer
 own environment assumptions. The three real routing defects this fork fixes were found by
 other means and are fixed in their own commits; they are not part of that 104.
 
-**The shared-memory targets run but cannot pass on a memory-capped host.** `zenoh/tests/shm.rs`
-reports 10 tests, where before the feature reached the crate at all it reported `running 0
-tests`. 5 pass; the rest fail or hang downstream of one line --
-`Unable to create POSIX shm segment: OS error 12` (ENOMEM) -- because the transport pool is
-`mlock`ed by whoever creates it and the default pool is 16 MiB, which exceeds `RLIMIT_MEMLOCK`
-on an ordinary host. It is NOT because `/dev/shm` is full (30 GB free when measured), and it is
-NOT cgroup memory charging, which this file previously said: removing the memory cap does not
-help, and `RLIMIT_MEMLOCK` alone reproduces the exact error. Corrected 2026-11-18 after the
-same error was traced to the limit on two production hosts whose `Max locked memory` was
-8388608 bytes.
-
-Either raise the limit for the run (`prlimit --memlock=...`), or shrink
-`transport/shared_memory/transport_optimization/pool_size`, or treat them as unverifiable on
-that host and say which.
+**The shared-memory targets need no locked memory.** `zenoh/tests/shm.rs` reports 10 tests,
+where before the feature reached the crate at all it reported `running 0 tests`. Until
+c19c210a1 most of them failed or hung on an ordinary host, downstream of one line --
+`Unable to create POSIX shm segment: OS error 12` (ENOMEM) -- because every shared-memory
+mapping was `mlock`ed and the default transport pool is 16 MiB, more than a typical
+`RLIMIT_MEMLOCK`. Nothing locks a mapping now, so that limit does not apply: neither raising it
+nor shrinking `transport/shared_memory/transport_optimization/pool_size` is needed to run them,
+and an ENOMEM from a segment says nothing about the limit.
 
 Run everything, including the gated targets, with:
 

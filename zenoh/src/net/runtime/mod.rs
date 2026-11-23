@@ -66,9 +66,7 @@ use zenoh_shm::api::client_storage::ShmClientStorage;
 // LOCAL PATCH: these two are used only by `ShmProviderState` and `get_shm_provider`, and
 // every one of those items carries BOTH `#[cfg(feature = "shared-memory")]` AND
 // `#[zenoh_macros::unstable]`. Imported under `shared-memory` alone they are dead whenever
-// `unstable` is off -- which is the configuration this fork's consumer builds
-// (`default-features = false, features = ["transport_tcp", "shared-memory"]`), so with
-// warnings denied the crate did not compile for it at all.
+// `unstable` is off, and with warnings denied that configuration does not compile.
 #[cfg(all(feature = "shared-memory", feature = "unstable"))]
 use zenoh_shm::api::{
     protocol_implementations::posix::posix_shm_provider_backend::PosixShmProviderBackend,
@@ -790,16 +788,11 @@ impl RuntimeBuilder {
         // (BER-2171).
         //
         // `init::init()` allocates the globals a session cannot do without --
-        // the metadata segment above all -- and each is `mlock`ed by its owner.
-        // Building the transport manager allocates the OPTIONAL transport pool,
-        // eagerly in `init` mode. Doing that first let a best-effort 16 MiB
-        // consume the locked-memory budget ahead of a mandatory 1.25 MiB, so a
-        // limit "sized for one pool" produced a failed open, or a panic, where
-        // lazy mode opened cleanly.
-        //
-        // Ordering it this way means a budget shortfall falls on the pool,
-        // which degrades to the network path by design, instead of on a segment
-        // whose absence is fatal.
+        // the metadata segment above all. Building the transport manager
+        // allocates the OPTIONAL transport pool, eagerly in `init` mode. Taking
+        // the mandatory segments first means a shared-memory shortfall falls on
+        // the pool, which degrades to the network path by design, instead of on
+        // a segment whose absence is fatal.
         #[cfg(feature = "shared-memory")]
         let shm_init_mode = *config.transport.shared_memory.mode();
         #[cfg(feature = "shared-memory")]
@@ -877,8 +870,8 @@ impl RuntimeBuilder {
         start_plugins(&runtime);
 
         // NOTE: the SHM subsystem was initialised BEFORE the transport manager,
-        // above, so the mandatory segments take their locked-memory budget
-        // ahead of the optional transport pool (BER-2171).
+        // above, so the mandatory segments are taken ahead of the optional
+        // transport pool (BER-2171).
 
         Ok(runtime)
     }

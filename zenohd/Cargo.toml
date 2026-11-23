@@ -33,23 +33,18 @@ version = { workspace = true }
 # "shared memory needs to be enabled also on the subscriber side" or the session
 # falls back to network, so a relay without it ends shared memory at that hop.
 #
-# NOTE, corrected 2026-11-18: this previously said every hecate2 service runs in
-# CLIENT mode, which made the router a relay on EVERY hop. That is no longer
-# true -- services run in PEER mode and BER-2085 restricted their multicast
-# autoconnect to `peer`, so they no longer link to the router at all. zenohd
-# still holds a residual set of sessions (measured: it dropped from 63.7% of a
-# core to about 10%, not to idle), so the feature is not useless, but it is no
-# longer on the path of ordinary service-to-service traffic. Whether zenohd
-# needs shared memory at all is now an open question rather than a settled
-# requirement; it is left enabled because disabling it is the change that would
-# need measuring
-# mode.
+# zenohd is not on the path of the consumer's own traffic: its services open
+# PEER sessions that name no connect endpoint and autoconnect only to peers, so
+# none links to the router (BER-2085). Whether zenohd needs shared memory at all
+# is an open question; it stays enabled because disabling it is the change that
+# would need measuring.
 #
-# Measured 2026-11-16: the installed `zenohd` had ZERO shared-memory symbols
-# while every hecate2 service binary had them, because the workspace pins
-# `zenoh` with `features = ["transport_tcp", "shared-memory"]`. So `shm = true`
-# in all 41 shipped configs was inert -- the capable end was talking to an
-# incapable one.
+# Measured 2026-11-16, when those services still ran in client mode through
+# zenohd: the installed `zenohd` had ZERO shared-memory symbols while every
+# hecate2 service binary had them, because the consumer's workspace pins `zenoh`
+# with `shared-memory` and a plain zenohd build did not enable it. So
+# `shm = true` in the shipped configs was inert -- the capable end was talking to
+# an incapable one.
 #
 # Defaulting it on removes a silent, install-flag-dependent failure. It only
 # ENABLES the capability: zenoh still gates actual use on its own

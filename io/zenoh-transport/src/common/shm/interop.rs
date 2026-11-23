@@ -870,12 +870,12 @@ mod tests {
     /// **EAGER INIT MUST LEAVE NO BUILD FOR THE FIRST MESSAGE TO WAIT ON.**
     ///
     /// Asserted as "the pending state is unreachable afterwards" rather than as
-    /// "the provider is Ready", because a host whose `RLIMIT_MEMLOCK` is below
-    /// the pool cannot allocate at all -- and on such a host `Ready` is simply
-    /// not available. `Error` is a correct outcome: it falls back to the network
-    /// path, which is what a failed lazy build did too. What must NOT survive is
-    /// `Initializing`, the state that means a message is waiting on a background
-    /// build -- that wait is the latency `ShmInitMode::Init` promises to remove.
+    /// "the provider is Ready", because a host that cannot allocate the pool
+    /// never reaches `Ready`. `Error` is a correct outcome: it falls back to the
+    /// network path, which is what a failed lazy build did too. What must NOT
+    /// survive is `Initializing`, the state that means a message is waiting on
+    /// a background build -- that wait is the latency `ShmInitMode::Init`
+    /// promises to remove.
     #[test]
     fn init_eagerly_leaves_no_lazy_build_for_the_first_message() {
         let provider = LazyShmProvider::new(NonZeroUsize::new(1024 * 1024).unwrap(), 0);

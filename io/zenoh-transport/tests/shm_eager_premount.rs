@@ -69,11 +69,8 @@ fn manager(
     let mut shm = zenoh_config::ShmConf::default();
     shm.set_enabled(true).unwrap();
     shm.set_mode(mode).unwrap();
-    // A SMALL POOL, because the default is 16 MiB and the owner mlocks it: on
-    // any host whose RLIMIT_MEMLOCK is below that -- every CI and dev box -- the
-    // eager build fails with ENOMEM, the provider lands in `Error`, and there
-    // is no pool id to advertise. The test would then pass or fail for a reason
-    // that has nothing to do with the handshake.
+    // A SMALL POOL: the test needs a pool id to advertise, not the default
+    // 16 MiB of shared memory.
     shm.transport_optimization
         .set_pool_size(std::num::NonZeroUsize::new(64 * 1024).unwrap())
         .unwrap();

@@ -99,10 +99,8 @@ impl ShmContext {
 
         // THE MANDATORY SEGMENTS FIRST (BER-2171). The auth segment is required
         // -- its failure is a `?` that refuses the session -- while the pool
-        // below is best-effort and degrades to the network path. Allocating the
-        // pool first let it consume the locked-memory budget ahead of the auth
-        // segment, so a tight limit refused the session instead of merely
-        // losing shared memory.
+        // below is best-effort and degrades to the network path, so a shortfall
+        // must fall on the pool rather than refuse the session.
         let shm_reader = external_reader
             .unwrap_or_else(|| ShmReader::new((*GLOBAL_CLIENT_STORAGE.read()).clone()));
 
@@ -170,8 +168,7 @@ mod tests {
         let mut cfg = zenoh_config::ShmConf::default();
         cfg.set_enabled(true).unwrap();
         cfg.set_mode(zenoh_config::ShmInitMode::Init).unwrap();
-        // Small, because the default 16 MiB pool is mlocked by its owner and
-        // will not allocate under a typical RLIMIT_MEMLOCK.
+        // Small: the test needs a pool id to advertise, not the default 16 MiB.
         cfg.transport_optimization
             .set_pool_size(std::num::NonZeroUsize::new(64 * 1024).unwrap())
             .unwrap();

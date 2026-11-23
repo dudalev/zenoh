@@ -184,18 +184,19 @@ unsafe_op_in_unsafe_fn = "warn"
 # LOCAL PATCH: see `upstream_only_tests` in [features].
 #
 # `regions` exercises the Region / Bound multi-router topology machinery -- 126 tests, over
-# eight scenario files PLUS `gossip.rs` (an earlier version of this said "across eight
-# scenarios", which loses the gossip test). This fork is consumed by a deployment of ONE
-# zenohd per host with client-mode sessions only: no router-to-router links and no peer
-# regions, so the TOPOLOGIES these scenarios build are never constructed.
+# eight scenario files PLUS `gossip.rs`. Every scenario links nodes to routers, builds a
+# custom `gateway` region layout, or both. This fork's consumer does neither: its services
+# open PEER sessions with the default layout, which find each other by multicast scouting on
+# the loopback interface, autoconnect only to peers and connect to nothing else, and the
+# one zenohd beside them on each host listens on loopback and connects to nothing.
 #
-# Not, as this said, that "none of this code is reached": regions and hats are the routing
-# core of every zenoh node. A zenohd gets a north router hat, south broker and peer hats and
-# a local hat, and a client session gets a north client hat and a local broker hat
-# (net/routing/gateway.rs). What we do not use is the multi-router scenarios, not the
-# machinery. It is also where the suite's failures are concentrated, and those are
-# `Elapsed` timeouts whose count moves run to run, so leaving it on makes a green run
-# impossible to tell from a lucky one.
+# That is not to say none of this code is reached: regions and hats are the routing core of
+# every zenoh node. A peer session gets a north peer hat and broker hats for its south and
+# local regions, and a zenohd gets a north router hat, south broker and peer hats and a
+# local broker hat (net/routing/gateway.rs). What we do not use is the multi-router
+# scenarios, not the machinery. It is also where the suite's failures are concentrated, and
+# those are `Elapsed` timeouts whose count moves run to run, so leaving it on makes a green
+# run impossible to tell from a lucky one.
 # LOCAL PATCH: see `upstream_only_tests` in [features].
 #
 # `liveliness` exercises the liveliness API, which has ZERO uses in this fork's consumer. It
