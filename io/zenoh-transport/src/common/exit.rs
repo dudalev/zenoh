@@ -64,7 +64,18 @@ pub(crate) fn has_begun() -> bool {
 
 /// Holds exit back while one map runs, or `None` once exit has begun.
 pub(crate) fn hold() -> Option<MapHold<'static>> {
+    #[cfg(any(test, feature = "test"))]
+    HOLDS_TAKEN.fetch_add(1, Ordering::Relaxed);
     GATE.hold()
+}
+
+/// How many times [`hold`] has been called, for tests only.
+#[cfg(any(test, feature = "test"))]
+static HOLDS_TAKEN: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(any(test, feature = "test"))]
+pub(crate) fn holds_taken() -> usize {
+    HOLDS_TAKEN.load(Ordering::Relaxed)
 }
 
 /// Whether exit has begun, and how many maps it has to wait for.

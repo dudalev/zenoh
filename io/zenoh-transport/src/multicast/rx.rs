@@ -56,20 +56,25 @@ impl TransportMulticastInner {
         #[cfg(feature = "shared-memory")]
         {
             if let Some(shm_context) = &self.shm_context {
-                use crate::unicast::establishment::ext::shm::handoff::RxHandoffChannel;
-
-                // Exit waits for this map, and refuses it once begun (BER-2456).
-                let Some(_exit) = crate::common::exit::hold() else {
-                    self.manager.count_undelivered();
-                    return Ok(());
+                use crate::{
+                    common::shm::interop::{map_zmsg_to_shmbuf, report_shm_rx_drop, ShmRx},
+                    unicast::establishment::ext::shm::handoff::RxHandoffChannel,
                 };
-                if let Err(e) = crate::common::shm::interop::map_zmsg_to_shmbuf(
+
+                match map_zmsg_to_shmbuf(
                     msg.as_mut(),
                     &shm_context.shm_reader,
                     &RxHandoffChannel::Disabled, // Multicast transport is unreliable, so it don't support SHM handoff
                 ) {
-                    crate::common::shm::interop::report_shm_rx_drop(peer.zid, &e);
-                    return Ok(());
+                    Ok(ShmRx::Deliver) => {}
+                    Ok(ShmRx::ExitBegun) => {
+                        self.manager.count_undelivered();
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        report_shm_rx_drop(peer.zid, &e);
+                        return Ok(());
+                    }
                 }
             }
         }

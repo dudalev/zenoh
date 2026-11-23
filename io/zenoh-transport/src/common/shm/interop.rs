@@ -80,6 +80,12 @@ struct ShmRxDropState {
 /// each entry is three integers.
 static SHM_RX_DROPS: Mutex<BTreeMap<ZenohIdProto, ShmRxDropState>> = Mutex::new(BTreeMap::new());
 
+/// How many received messages have asked for the exit hold, for tests only (BER-2474).
+#[cfg(any(test, feature = "test"))]
+pub fn exit_holds_taken() -> usize {
+    crate::common::exit::holds_taken()
+}
+
 /// A peer's `(total, reported, last_report_ms)`, for tests only.
 #[cfg(any(test, feature = "test"))]
 pub fn shm_rx_drop_state(peer: &ZenohIdProto) -> Option<(u64, u64, u64)> {
@@ -499,17 +505,27 @@ pub fn map_zmsg_to_partner<ShmCfg: PartnerShmConfig>(
     open.close()
 }
 
+/// What a receive path does with a message once its shared-memory buffers are dealt with.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ShmRx {
+    /// Deliver it: every buffer it carries is mapped, or it carries none.
+    Deliver,
+    /// Drop it: it carries a buffer, and process exit has begun, so nothing was mapped
+    /// (BER-2456).
+    ExitBegun,
+}
+
 pub fn map_zmsg_to_shmbuf(
     msg: NetworkMessageMut,
     shmr: &ShmReader,
     handoff: &RxHandoffChannel,
-) -> ZResult<()> {
+) -> ZResult<ShmRx> {
     match msg.body {
         NetworkBodyMut::Push(Push {
             payload, ext_qos, ..
         }) => match payload {
             PushBody::Put(b) => b.map_to_shmbuf(shmr, handoff, ext_qos.get_priority()),
-            PushBody::Del(_) => Ok(()),
+            PushBody::Del(_) => Ok(ShmRx::Deliver),
         },
         NetworkBodyMut::Request(Request {
             payload, ext_qos, ..
@@ -525,7 +541,7 @@ pub fn map_zmsg_to_shmbuf(
         NetworkBodyMut::ResponseFinal(_)
         | NetworkBodyMut::Interest(_)
         | NetworkBodyMut::Declare(_)
-        | NetworkBodyMut::OAM(_) => Ok(()),
+        | NetworkBodyMut::OAM(_) => Ok(ShmRx::Deliver),
     }
 }
 
@@ -547,7 +563,7 @@ trait MapShm {
         shmr: &ShmReader,
         handoff: &RxHandoffChannel,
         priority: Priority,
-    ) -> ZResult<()>;
+    ) -> ZResult<ShmRx>;
 
     // TX:
     // - shmbuf -> shminfo if partner supports shmbuf's SHM protocol
@@ -594,18 +610,24 @@ fn map_to_shmbuf<const ID: u8>(
     shmr: &ShmReader,
     handoff: &RxHandoffChannel,
     priority: Priority,
-) -> ZResult<()> {
-    let mut result = Ok(());
-    if ext_shm.is_some() {
-        *ext_shm = None;
-        for zs in zbuf.zslices_mut() {
-            if zs.kind == ZSliceKind::ShmPtr {
-                let new_result = map_zslice_to_shmbuf(zs, shmr);
-                // Handle RX handoff
-                handoff.on_rx(priority);
-                if let Err(e) = new_result {
-                    result = Err(e);
-                }
+) -> ZResult<ShmRx> {
+    if ext_shm.is_none() {
+        return Ok(ShmRx::Deliver);
+    }
+    // Exit waits for this map, and refuses it once begun (BER-2456). Taken here, where a
+    // message carries a buffer to map, so that one carrying none pays nothing (BER-2474).
+    let Some(_exit) = crate::common::exit::hold() else {
+        return Ok(ShmRx::ExitBegun);
+    };
+    *ext_shm = None;
+    let mut result = Ok(ShmRx::Deliver);
+    for zs in zbuf.zslices_mut() {
+        if zs.kind == ZSliceKind::ShmPtr {
+            let new_result = map_zslice_to_shmbuf(zs, shmr);
+            // Handle RX handoff
+            handoff.on_rx(priority);
+            if let Err(e) = new_result {
+                result = Err(e);
             }
         }
     }
@@ -637,7 +659,7 @@ impl MapShm for Put {
         shmr: &ShmReader,
         handoff: &RxHandoffChannel,
         priority: Priority,
-    ) -> ZResult<()> {
+    ) -> ZResult<ShmRx> {
         let Self {
             payload, ext_shm, ..
         } = self;
@@ -675,7 +697,7 @@ impl MapShm for Query {
         shmr: &ShmReader,
         handoff: &RxHandoffChannel,
         priority: Priority,
-    ) -> ZResult<()> {
+    ) -> ZResult<ShmRx> {
         if let Self {
             ext_body: Some(QueryBodyType {
                 payload, ext_shm, ..
@@ -683,9 +705,9 @@ impl MapShm for Query {
             ..
         } = self
         {
-            map_to_shmbuf(payload, ext_shm, shmr, handoff, priority)?;
+            return map_to_shmbuf(payload, ext_shm, shmr, handoff, priority);
         }
-        Ok(())
+        Ok(ShmRx::Deliver)
     }
 }
 
@@ -716,14 +738,14 @@ impl MapShm for Reply {
         shmr: &ShmReader,
         handoff: &RxHandoffChannel,
         priority: Priority,
-    ) -> ZResult<()> {
+    ) -> ZResult<ShmRx> {
         if let PushBody::Put(Put {
             payload, ext_shm, ..
         }) = &mut self.payload
         {
-            map_to_shmbuf(payload, ext_shm, shmr, handoff, priority)?;
+            return map_to_shmbuf(payload, ext_shm, shmr, handoff, priority);
         }
-        Ok(())
+        Ok(ShmRx::Deliver)
     }
 }
 
@@ -752,7 +774,7 @@ impl MapShm for Err {
         shmr: &ShmReader,
         handoff: &RxHandoffChannel,
         priority: Priority,
-    ) -> ZResult<()> {
+    ) -> ZResult<ShmRx> {
         let Self {
             payload, ext_shm, ..
         } = self;

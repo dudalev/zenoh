@@ -195,6 +195,23 @@ mapping was `mlock`ed and the default transport pool is 16 MiB, more than a typi
 nor shrinking `transport/shared_memory/transport_optimization/pool_size` is needed to run them,
 and an ENOMEM from a segment says nothing about the limit.
 
+**What the exit hold costs** (BER-2474). Exit waits for the maps in flight through a hold,
+two SeqCst read-modify-writes on one counter that every receive thread shares. Only a message
+that carries a shared-memory buffer takes it, where the buffer is mapped; a message with none
+pays nothing for it. A payload below `message_size_threshold` (3072 bytes by default) travels
+with none, unless the sender put it in shared memory itself. Measured 2026-11-24 with the
+review's micro-benchmark of a copy of `ExitGate`
+(`rustc -O`, rustc 1.100.0), nanoseconds per message, the better of two runs of best of 3,
+every thread running the same loop:
+
+| receive threads | loop alone | a message at -7, before | no buffer, now | a buffer, now |
+|---|---|---|---|---|
+| 1 | 0.40 | 2.50 | 0.41 | 2.55 |
+| 2 | 0.41 | 20.87 | 0.41 | 17.73 |
+| 8 | 0.43 | 97.29 | 0.45 | 84.88 |
+
+The loop has nothing else in it, so the contended figures are an upper bound for real traffic.
+
 **The multicast tests join their group on loopback** (`#iface=127.0.0.1`): left to choose, the
 udp link takes the first non-loopback multicast interface, and on a host whose firewall drops
 multicast there they cannot pass at all (BER-2458). To run them over a real interface, name it,
