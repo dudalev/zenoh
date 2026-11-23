@@ -753,7 +753,6 @@ impl Primitives for Face {
     fn send_close(&self) {
         let mut state = self.state.clone();
         state.task_controller.terminate_all(Duration::from_secs(10));
-        finalize_pending_queries(&self.tables, &mut state);
         let mut declares = vec![];
         let ctrl_lock = zlock!(self.tables.ctrl_lock);
         finalize_pending_interests(&self.tables, &mut state, &mut |p, m| {
@@ -944,8 +943,17 @@ impl Primitives for Face {
 
         tables.data.faces.remove(&src_fid);
 
+        // A cached route can hold this face for a reason none of the removals above undoes --
+        // a peer whose initial interest is unanswered receives every query -- and a query
+        // routed to it now would wait out its timeout on a face that never answers
+        // (BER-2457). So this region's routes are recomputed without it.
+        hats[region].disable_all_routes(&mut tables.data);
+
         drop(wtables);
         drop(ctrl_lock);
+        // Only now that no route reaches this face: a query routed to it before the routes
+        // were recomputed is pending here, and is finalized with the rest.
+        finalize_pending_queries(&self.tables, &mut state);
         for (p, m) in declares {
             m.with_mut(|m| p.send_declare(m));
         }

@@ -53,6 +53,10 @@ yet at the commit that introduced the table.
   nothing, so a closing session maps no shared-memory buffer; so does a process that has begun
   to exit with its session open, and the exit waits for the maps already in flight. And zenohd
   builds with shared memory by default.
+* **A query no longer waits on a peer that has closed.** A closing face takes itself out of
+  every cached route and only then finalizes its pending queries. Upstream left a closed peer
+  in the routes of a peer that had not yet had its answer to the initial interest, so the next
+  query waited out its timeout there.
 * **One upstream fix carried**, [#2862](https://github.com/eclipse-zenoh/zenoh/pull/2862),
   under two criteria: it has a test that fails here, and it is reachable by what we run. That
   PR is OPEN and unreviewed upstream -- it is not accepted code.

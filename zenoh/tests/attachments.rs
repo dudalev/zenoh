@@ -13,9 +13,19 @@
 //
 use zenoh::{config::Config, Wait};
 
+/// LOCAL PATCH: multicast scouting off, so that each test's session talks to itself and to
+/// no zenoh it finds on the host, an installed zenohd among them (BER-2457).
+fn config() -> Config {
+    let mut config = Config::default();
+    config
+        .insert_json5("scouting/multicast/enabled", "false")
+        .unwrap();
+    config
+}
+
 #[test]
 fn attachment_pubsub() {
-    let zenoh = zenoh::open(Config::default()).wait().unwrap();
+    let zenoh = zenoh::open(config()).wait().unwrap();
     const ATTACHMENT: &[u8] = b"pubsub attachment";
     zenoh
         .declare_subscriber("test/attachment")
@@ -42,7 +52,7 @@ fn attachment_pubsub() {
 
 #[test]
 fn attachment_queries() {
-    let zenoh = zenoh::open(Config::default()).wait().unwrap();
+    let zenoh = zenoh::open(config()).wait().unwrap();
     const QUERY_ATTACHMENT: &[u8] = b"query attachment";
     const REPLY_ATTACHMENT: &[u8] = b"reply attachment";
     let _queryable = zenoh
