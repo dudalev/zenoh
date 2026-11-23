@@ -49,10 +49,15 @@ yet at the commit that introduced the table.
   sender's pool before any message needs it and releases the mount when the link closes.
   Nothing `mlock`s a mapping, so locked memory does not limit shared memory at all. A read
   of zenoh-shm's statics after process exit has finalized them fails instead of panicking.
-  A transport manager that has begun to close admits no new unicast transport and delivers
-  nothing, so a closing session maps no shared-memory buffer; so does a process that has begun
-  to exit with its session open, and the exit waits for the maps already in flight. And zenohd
-  builds with shared memory by default.
+  A transport manager that has begun to close runs no accept handshake, admits no new unicast
+  transport and delivers nothing, so a closing session maps no shared-memory buffer. It
+  refuses a transport with no Close frame, so the healthy peer whose dial it refuses logs no
+  ERROR, and it counts what it did not deliver and logs the count at DEBUG when it has closed.
+  A process that has begun to exit with a shared-memory session open does the same, on unix
+  only: an `atexit` hook marks exit as begun before zenoh-shm's statics are finalized, and
+  waits for the maps already in flight, for at most 1 s. Not covered: a map that takes
+  longer than that, and an accept handshake already running when exit begins, can still
+  meet a finalized static. And zenohd builds with shared memory by default.
 * **A query no longer waits on a peer that has closed.** A closing face takes itself out of
   every cached route and only then finalizes its pending queries. Upstream left a closed peer
   in the routes of a peer that had not yet had its answer to the initial interest, so the next
@@ -70,6 +75,9 @@ yet at the commit that introduced the table.
 * **Test-suite scope.** Upstream targets exercising features this fork's consumer does not use
   are gated behind `upstream_only_tests`, and a few single tests are `#[ignore]`d with their
   reason. Nothing is deleted.
+* **No test reaches a zenoh the host runs** (BER-2469). A test that scouts does so in a
+  scouting group of its own, with scouting on, and a test whose subject needs a router runs
+  the zenohd built from this fork. See "Tests and the zenoh on the host" below.
 * **`rust-toolchain.toml`: 1.100** (upstream pins 1.97.1). The fork's own MSRV declaration is
   unchanged at `rust-version = "1.75.0"`, which is upstream's claim and what the non-member
   `ci/zenoh-1-75` crate exists to test; nothing builds this fork on anything but the pinned
@@ -109,6 +117,20 @@ itself pins `zenoh` with `transport_tcp`, `shared-memory` and `unstable` (its ro
 reaches that crate -- but this fork does edit its manifest, to gate that target, so "nothing
 in this fork's changes reaches it" (as this said) is not true.
 
+**Running one target.** Name its package, the target, and the features the target's own
+`#![cfg]` asks for:
+
+```bash
+CARGO_TARGET_DIR=/path/outside/the/synced/tree \
+  cargo test -p zenoh-transport --features shared-memory,transport_tcp --test shm_rx_after_close
+```
+
+zenoh-transport's defaults do not include `transport_tcp`, and a target whose `#![cfg]` asks
+for a feature that is off compiles to `running 0 tests` and reports `ok`: read the count.
+zenoh-transport's tests do not build zenoh (BER-2470), so its features need not match zenoh's.
+A target of zenoh or of zenohd runs the same way, for instance `cargo test -p zenoh --test qos`
+or `cargo test -p zenohd --test attachments`.
+
 **What the suite does, with the number of runs beside it.** Measured 2026-11-14 on
 `rustc 1.100.0 (0ef1bc386)`:
 
@@ -118,6 +140,18 @@ in this fork's changes reaches it" (as this said) is not true.
 | `cargo test` (plain), before that gating | 6, two campaigns | 4 green at 880 / 0 / 54; 2 red |
 | the full-feature command above | 1 | green, 152 binaries, 977 passed / 0 failed / 79 ignored |
 | `--no-default-features -F transport_tcp,shared-memory` (the consumer's set then; it has since added `unstable`) | 1 | builds clean |
+
+At tag `hecate-1.10.2-7`, measured 2026-11-24 on the same toolchain, with other builds running
+on the host:
+
+| command | runs | result |
+|---|---|---|
+| the full-feature command above | 2 | green both times, 118 test binaries and 37 doc-test sets, 960 passed / 0 failed / 126 ignored |
+| `cargo build -p zenoh --no-default-features -F transport_tcp,shared-memory`, and with `,unstable` (the consumer's set) | 1 each | builds clean |
+
+`tests::link_weights` picks its routers' ports free and binds them only as each router opens,
+so another test of the binary can take one in between. It then opens its routers again on new
+ports and prints "opening the routers again on new ports", which is not a failure.
 
 Each red run failed exactly ONE test, and a DIFFERENT one each time:
 
@@ -164,8 +198,34 @@ and an ENOMEM from a segment says nothing about the limit.
 **The multicast tests join their group on loopback** (`#iface=127.0.0.1`): left to choose, the
 udp link takes the first non-loopback multicast interface, and on a host whose firewall drops
 multicast there they cannot pass at all (BER-2458). To run them over a real interface, name it,
-or its address, in `ZENOH_TEST_MULTICAST_IFACE`. It applies to `zenoh/tests/shm.rs` and
-`io/zenoh-transport/tests/shm_rx_after_close_multicast.rs`.
+or its address, in `ZENOH_TEST_MULTICAST_IFACE`. It applies to `zenoh/tests/shm.rs`,
+`io/zenoh-transport/tests/shm_rx_after_close_multicast.rs`, `TestSessions::open_pairs_multicast`
+(`zenoh/tests/session.rs`'s `zenoh_session_multicast`), `zenoh/tests/adminspace.rs`'s
+`test_adminspace_read` and `zenoh/tests/routing.rs`'s `three_node_combination_multicast`, and to
+the interface every `ScoutingGroup` scouts on. The zenoh-transport targets `multicast_transport`
+and `multicast_compression` still join theirs on the default interface; they are gated behind
+`upstream_only_tests`.
+
+**Tests and the zenoh on the host** (BER-2469). A session opened from `Config::default()`
+scouts the default group, 224.0.0.224:7446, and finds whatever zenoh the host runs there, so
+its test's result would depend on the host. So:
+
+* A test that scouts does so in a `zenoh_test::ScoutingGroup`: 224.0.0.224 on a port the group
+  holds for its lifetime, joined on loopback or `ZENOH_TEST_MULTICAST_IFACE`, with scouting
+  on. Switching scouting off to keep clear of the host's router would test a configuration
+  the consumer does not run.
+* A test whose subject needs a router lives in `zenohd/tests/` and runs the zenohd built from
+  this fork, `env!("CARGO_BIN_EXE_zenohd")`, in its group through `zenoh_test::Zenohd`. Cargo
+  builds that binary for the same run, and only a test of the zenohd package is given it. Each
+  session waits for its router link (`Zenohd::wait_linked`), and two sessions that find each
+  other wait for theirs (`wait_for_peers`), before the test body: a fixed sleep is how
+  BER-2457 was found.
+* A doc example that opens a session or scouts builds its `config` from a `ScoutingGroup` in a
+  hidden line, so its rendered text changes by one token at most. Count such examples from
+  rustdoc's own list, which `cargo test --doc` prints: a scan that pairs doc fences in order
+  misreads the blocks upstream leaves unclosed.
+* `zenohd/tests/scouting_group.rs` checks the property itself: a session finds the zenohd in
+  its own group, and a session in another group finds nothing.
 
 Run everything, including the gated targets, with:
 
