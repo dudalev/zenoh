@@ -5,12 +5,18 @@ publish = false
 version = { workspace = true }
 
 [features]
-internal = ["zenoh-config/internal", "zenoh/internal"]
-unstable = ["zenoh-config/unstable", "zenoh/unstable"]
+# LOCAL PATCH: the helpers that open a session, and so build zenoh: `TestSessions`, `Zenohd`,
+# `wait_for_peers` and the locator getters. A crate whose tests use only the ports, the
+# multicast interface or a `ScoutingGroup`, as zenoh-transport's do, takes zenoh-test without
+# it, and then its own features need not match zenoh's: zenoh-transport's `shared-memory`
+# adds a field that zenoh fills only with its own (BER-2470).
+internal = ["sessions", "zenoh-config/internal", "zenoh/internal"]
+sessions = ["dep:zenoh"]
+unstable = ["sessions", "zenoh-config/unstable", "zenoh/unstable"]
 
 [dependencies]
 tokio = { workspace = true, features = ["rt", "time"] }
-zenoh = { workspace = true, features = ["internal", "unstable"] }
+zenoh = { workspace = true, features = ["internal", "unstable"], optional = true }
 zenoh-config = { workspace = true }
 zenoh-core = { workspace = true }
 zenoh-link = { workspace = true }

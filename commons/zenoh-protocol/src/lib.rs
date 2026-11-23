@@ -30,6 +30,11 @@ pub mod zenoh;
 // Zenoh version
 pub const VERSION: u8 = 0x09;
 
+/// LOCAL PATCH: whether this crate is built with `shared-memory`, which adds fields to its
+/// messages. zenoh asserts that it is built with the feature too (BER-2470).
+#[doc(hidden)]
+pub const SHARED_MEMORY: bool = cfg!(feature = "shared-memory");
+
 // Zenoh protocol uses the following conventions for message definition and representation.
 //
 //

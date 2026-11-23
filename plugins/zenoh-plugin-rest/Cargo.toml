@@ -63,7 +63,7 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 clap = { workspace = true }
-zenoh-test = { workspace = true }
+zenoh-test = { workspace = true, features = ["sessions"] }
 
 [[example]]
 name = "z_serve_sse"

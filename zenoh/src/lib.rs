@@ -249,6 +249,15 @@ const GIT_COMMIT: &str = git_version::git_version!(
 pub const GIT_VERSION: &str =
     const_format::concatcp!("v", env!("CARGO_PKG_VERSION"), "-", GIT_COMMIT);
 
+// LOCAL PATCH: zenoh-protocol's `shared-memory` adds fields that zenoh fills only with its own
+// `shared-memory`, so the combination fails as E0063 errors; this says why (BER-2470).
+#[cfg(not(feature = "shared-memory"))]
+const _: () = assert!(
+    !zenoh_protocol::SHARED_MEMORY,
+    "zenoh-protocol is built with `shared-memory` and zenoh is not: enable zenoh's \
+     `shared-memory` feature"
+);
+
 #[doc(hidden)]
 pub const FEATURES: &str = zenoh_util::concat_enabled_features!(
     prefix = "zenoh",

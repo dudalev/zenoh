@@ -40,30 +40,40 @@
 //! router runs the zenohd built from this workspace, through [`Zenohd`].
 
 use std::{
-    io::{BufRead, BufReader, Read},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket},
     ops::DerefMut,
+    time::Duration,
+};
+#[cfg(feature = "sessions")]
+use std::{
+    io::{BufRead, BufReader, Read},
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicU16, Ordering},
         Arc, Mutex,
     },
     thread::JoinHandle,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 #[cfg(feature = "internal")]
 use zenoh::internal::runtime::{Runtime, RuntimeBuilder};
+#[cfg(feature = "sessions")]
 use zenoh::{Session, Wait};
+#[cfg(feature = "sessions")]
 use zenoh_config::{WhatAmI, ZenohId};
+#[cfg(feature = "sessions")]
 use zenoh_core::ztimeout;
 use zenoh_link::EndPoint;
-use zenoh_protocol::core::{EndPoints, Parameters};
+use zenoh_protocol::core::Parameters;
+#[cfg(feature = "sessions")]
+use zenoh_protocol::core::EndPoints;
 
 /// Default timeout applied to async operations via [`ztimeout!`].
 pub const TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How often a wait below checks again.
+#[cfg(feature = "sessions")]
 const POLL: Duration = Duration::from_millis(10);
 
 /// Binds to a random TCP port on loopback and returns the assigned port number.
@@ -205,6 +215,7 @@ impl ScoutingGroup {
 /// `zenohd` package is given it as `env!("CARGO_BIN_EXE_zenohd")`, and cargo builds it for
 /// that run. A zenohd from anywhere else, such as the one installed on the host, would test
 /// a different router (BER-2469).
+#[cfg(feature = "sessions")]
 pub struct Zenohd {
     child: Mutex<Child>,
     zid: ZenohId,
@@ -212,6 +223,7 @@ pub struct Zenohd {
     readers: Vec<JoinHandle<()>>,
 }
 
+#[cfg(feature = "sessions")]
 impl Zenohd {
     /// Starts `binary` in `group`, listening on a loopback port the OS picks, with no
     /// plugins.
@@ -299,6 +311,7 @@ impl Zenohd {
     }
 }
 
+#[cfg(feature = "sessions")]
 impl Drop for Zenohd {
     fn drop(&mut self) {
         let child = self.child.get_mut().unwrap_or_else(|e| e.into_inner());
@@ -315,6 +328,7 @@ impl Drop for Zenohd {
 
 /// Waits until `a` and `b` each have a transport to the other: two sessions that find each
 /// other by scouting may not have done so when they open.
+#[cfg(feature = "sessions")]
 pub async fn wait_for_peers(a: &Session, b: &Session) {
     ztimeout!(async {
         while !(is_linked(a, &b.zid()).await && is_linked(b, &a.zid()).await) {
@@ -323,6 +337,7 @@ pub async fn wait_for_peers(a: &Session, b: &Session) {
     });
 }
 
+#[cfg(feature = "sessions")]
 async fn is_linked(session: &Session, peer: &ZenohId) -> bool {
     session.info().peers_zid().await.any(|zid| &zid == peer)
 }
@@ -332,6 +347,7 @@ async fn is_linked(session: &Session, peer: &ZenohId) -> bool {
 /// This is a convenience wrapper around [`get_locators_from_session`] that
 /// filters for the `tcp/` protocol — handy when a listener was opened with
 /// `tcp/127.0.0.1:0` and you need the resolved address for a connector.
+#[cfg(feature = "sessions")]
 pub async fn get_tcp_locator(session: &Session) -> EndPoint {
     get_locators_from_session(session)
         .await
@@ -341,6 +357,7 @@ pub async fn get_tcp_locator(session: &Session) -> EndPoint {
 }
 
 /// Queries `session` for its current locators (async version).
+#[cfg(feature = "sessions")]
 pub async fn get_locators_from_session(session: &Session) -> Vec<EndPoint> {
     session
         .info()
@@ -352,6 +369,7 @@ pub async fn get_locators_from_session(session: &Session) -> Vec<EndPoint> {
 }
 
 /// Queries `session` for its current locators (blocking version).
+#[cfg(feature = "sessions")]
 pub fn get_locators_from_session_sync(session: &Session) -> Vec<EndPoint> {
     session
         .info()
@@ -367,6 +385,7 @@ pub fn get_locators_from_session_sync(session: &Session) -> Vec<EndPoint> {
 /// This is a standalone helper kept for backward compatibility with tests that
 /// manage sessions outside of [`TestSessions`].  Prefer
 /// [`TestSessions::close`] for new code.
+#[cfg(feature = "sessions")]
 pub async fn close_session(peer01: Session, peer02: Session) {
     println!("[  ][01d] Closing peer01 session");
     ztimeout!(peer01.close()).unwrap();
@@ -387,18 +406,21 @@ pub async fn close_session(peer01: Session, peer02: Session) {
 /// internally stored locators with the ones from the newly opened listener.
 /// If you need locators from a previously opened listener, call
 /// [`get_locators_from_session`] directly.
+#[cfg(feature = "sessions")]
 pub struct TestSessions {
     locators: Vec<EndPoint>,
     listener_sessions: Vec<Session>,
     connector_sessions: Vec<Session>,
 }
 
+#[cfg(feature = "sessions")]
 impl Default for TestSessions {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "sessions")]
 impl TestSessions {
     /// Creates an empty `TestSessions` with no sessions and no stored locators.
     pub fn new() -> Self {
