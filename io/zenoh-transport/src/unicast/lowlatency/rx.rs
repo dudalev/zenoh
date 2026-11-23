@@ -36,6 +36,10 @@ impl TransportUnicastLowlatency {
         #[cfg(feature = "stats")] stats: &zenoh_stats::LinkStats,
         #[cfg(feature = "shared-memory")] rx_handoff: &RxHandoffChannel,
     ) -> ZResult<()> {
+        // A closing manager delivers nothing and maps nothing (BER-2230).
+        if self.manager.is_closed() {
+            return Ok(());
+        }
         let callback = zread!(self.callback).clone();
         if let Some(callback) = callback.as_ref() {
             #[cfg(feature = "stats")]

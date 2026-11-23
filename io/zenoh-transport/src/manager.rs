@@ -11,7 +11,15 @@
 // Contributors:
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
-use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    fmt,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use rand::{RngCore, SeedableRng};
 use tokio::sync::Mutex as AsyncMutex;
@@ -183,6 +191,8 @@ impl fmt::Debug for TransportManagerConfig {
 pub struct TransportManagerState {
     pub unicast: TransportManagerStateUnicast,
     pub multicast: TransportManagerStateMulticast,
+    /// Set when [`TransportManager::close`] begins, and never cleared.
+    closed: AtomicBool,
     #[cfg(feature = "shared-memory")]
     pub shm_context: Option<ShmContext>,
     #[cfg(all(
@@ -539,6 +549,7 @@ impl TransportManagerBuilder {
         let state = TransportManagerState {
             unicast: unicast.state,
             multicast: multicast.state,
+            closed: AtomicBool::new(false),
             #[cfg(feature = "shared-memory")]
             shm_context,
             #[cfg(all(
@@ -719,9 +730,22 @@ impl TransportManager {
     }
 
     pub async fn close(&self) {
+        // FIRST, so that from here on nothing is delivered, not even by a transport this
+        // close has not reached yet, and no new unicast transport is admitted, so none
+        // can arrive after the drain below and outlive this close (BER-2230).
+        self.state.closed.store(true, Ordering::Release);
         self.close_unicast().await;
         self.close_multicast().await;
         self.task_controller.terminate_all_async().await;
+    }
+
+    /// Whether [`TransportManager::close`] has begun.
+    ///
+    /// Once it has, no new unicast transport is admitted, and the receive paths deliver
+    /// nothing and so map no shared-memory buffer: zenoh-shm's statics are finalized at
+    /// process exit, where every map fails.
+    pub fn is_closed(&self) -> bool {
+        self.state.closed.load(Ordering::Acquire)
     }
 
     /*************************************/

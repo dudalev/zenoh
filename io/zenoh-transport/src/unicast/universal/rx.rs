@@ -46,6 +46,10 @@ impl TransportUnicastUniversal {
         #[cfg(feature = "stats")] stats: &zenoh_stats::LinkStats,
         #[cfg(feature = "shared-memory")] link: &TransportLinkUnicastRx,
     ) -> ZResult<()> {
+        // A closing manager delivers nothing and maps nothing (BER-2230).
+        if self.manager.is_closed() {
+            return Ok(());
+        }
         #[cfg(feature = "stats")]
         stats.inc_network_message(
             zenoh_stats::Rx,

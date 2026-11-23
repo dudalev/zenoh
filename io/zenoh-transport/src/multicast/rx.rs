@@ -42,6 +42,10 @@ impl TransportMulticastInner {
         mut msg: NetworkMessageMut,
         peer: &TransportMulticastPeer,
     ) -> ZResult<()> {
+        // A closing manager delivers nothing and maps nothing (BER-2230).
+        if self.manager.is_closed() {
+            return Ok(());
+        }
         #[cfg(feature = "stats")]
         peer.stats.inc_network_message(
             zenoh_stats::Rx,

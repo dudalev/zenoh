@@ -797,28 +797,47 @@ impl TransportManager {
         // First verify if the transport already exists
         let init_result = {
             let guard = zasynclock!(self.state.unicast.transports);
-            match guard.get(&config.zid) {
-                Some(transport) => {
-                    let transport = transport.clone();
-                    drop(guard);
-                    self.init_existing_transport_unicast(
-                        config,
-                        link,
-                        other_initial_sn,
-                        other_lease,
-                        transport,
-                    )
-                    .await
-                }
-                None => {
-                    self.init_new_transport_unicast(
-                        config,
-                        link,
-                        other_initial_sn,
-                        other_lease,
-                        guard,
-                    )
-                    .await
+            // Checked under the lock `close_unicast` drains the table with, so a transport is
+            // either in the table when it is drained, and closed with it, or refused here.
+            if self.is_closed() {
+                drop(guard);
+                let e = zerror!(
+                    "{} Closed: refusing a new transport with peer {}",
+                    self.zid(),
+                    config.zid
+                );
+                tracing::debug!("{e}");
+                let (l, asl) = link.fail();
+                Err(InitTransportError::Link(Box::new((
+                    e.into(),
+                    l,
+                    asl,
+                    close::reason::GENERIC,
+                ))))
+            } else {
+                match guard.get(&config.zid) {
+                    Some(transport) => {
+                        let transport = transport.clone();
+                        drop(guard);
+                        self.init_existing_transport_unicast(
+                            config,
+                            link,
+                            other_initial_sn,
+                            other_lease,
+                            transport,
+                        )
+                        .await
+                    }
+                    None => {
+                        self.init_new_transport_unicast(
+                            config,
+                            link,
+                            other_initial_sn,
+                            other_lease,
+                            guard,
+                        )
+                        .await
+                    }
                 }
             }
         };

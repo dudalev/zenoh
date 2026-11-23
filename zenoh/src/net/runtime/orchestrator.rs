@@ -1085,6 +1085,10 @@ impl Runtime {
     /// Returns `true` if a new Transport instance is established with `zid` or had already been established.
     #[must_use]
     async fn connect(&self, zid: &ZenohIdProto, scouted_locators: &[Locator]) -> bool {
+        if self.manager().is_closed() {
+            tracing::debug!("Transport manager closed: not connecting to {}", zid);
+            return false;
+        }
         if scouted_locators.is_empty() {
             return false;
         }
@@ -1200,6 +1204,10 @@ impl Runtime {
     /// Returns `true` if a new Transport instance is established with `zid` or had already been established.
     pub async fn connect_peer(&self, zid: &ZenohIdProto, locators: &[Locator]) -> bool {
         let manager = self.manager();
+        if manager.is_closed() {
+            tracing::debug!("Transport manager closed: not connecting to peer {}", zid);
+            return false;
+        }
         if zid != &manager.zid() {
             let has_unicast = manager.get_transport_unicast(zid).await.is_some();
             let has_multicast = {
@@ -1524,5 +1532,83 @@ mod tests {
             .expect("timed out waiting for loopback multicast packet")
             .unwrap();
         assert_eq!(&buf[..n], payload);
+    }
+
+    #[cfg(feature = "transport_tcp")]
+    mod dial_after_close {
+        use super::*;
+
+        /// How long a test waits for a dial that must not come.
+        const NO_DIAL_WINDOW: Duration = Duration::from_secs(1);
+
+        /// A runtime that has not started, and a plain TCP listener standing in for the
+        /// peer it would dial.
+        async fn runtime_and_listener() -> (Runtime, tokio::net::TcpListener, [Locator; 1]) {
+            let runtime = RuntimeBuilder::new(Config::default())
+                .build()
+                .await
+                .unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let locator = format!("tcp/{}", listener.local_addr().unwrap())
+                .parse()
+                .unwrap();
+            (runtime, listener, [locator])
+        }
+
+        /// The connections `listener` accepts until none comes for `NO_DIAL_WINDOW`. Each is
+        /// dropped at once, so a dial fails fast instead of waiting out its handshake.
+        async fn dials(listener: &tokio::net::TcpListener) -> usize {
+            let mut dials = 0;
+            while let Ok(Ok((stream, _))) = timeout(NO_DIAL_WINDOW, listener.accept()).await {
+                drop(stream);
+                dials += 1;
+            }
+            dials
+        }
+
+        /// **A RUNTIME WHOSE TRANSPORT MANAGER HAS CLOSED DIALS NO PEER THROUGH `connect`**
+        /// (BER-2230), with an open-runtime control.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_closed_manager_dials_no_peer_through_connect() {
+            let zid = ZenohIdProto::rand();
+
+            let (open, listener, locators) = runtime_and_listener().await;
+            let (connected, dialled) =
+                tokio::join!(open.connect(&zid, &locators), dials(&listener));
+            assert!(!connected, "the stand-in peer speaks no zenoh");
+            assert_ne!(dialled, 0, "an open runtime must dial");
+
+            let (closed, listener, locators) = runtime_and_listener().await;
+            closed.manager().close().await;
+            let (connected, dialled) =
+                tokio::join!(closed.connect(&zid, &locators), dials(&listener));
+            assert!(!connected);
+            assert_eq!(
+                dialled, 0,
+                "a runtime whose transport manager has closed must not dial"
+            );
+        }
+
+        /// **THE SAME THROUGH `connect_peer`**, which is how a gossip re-dial reaches it.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_closed_manager_dials_no_peer_through_connect_peer() {
+            let zid = ZenohIdProto::rand();
+
+            let (open, listener, locators) = runtime_and_listener().await;
+            let (connected, dialled) =
+                tokio::join!(open.connect_peer(&zid, &locators), dials(&listener));
+            assert!(!connected, "the stand-in peer speaks no zenoh");
+            assert_ne!(dialled, 0, "an open runtime must dial");
+
+            let (closed, listener, locators) = runtime_and_listener().await;
+            closed.manager().close().await;
+            let (connected, dialled) =
+                tokio::join!(closed.connect_peer(&zid, &locators), dials(&listener));
+            assert!(!connected);
+            assert_eq!(
+                dialled, 0,
+                "a runtime whose transport manager has closed must not dial"
+            );
+        }
     }
 }

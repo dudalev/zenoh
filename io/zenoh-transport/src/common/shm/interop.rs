@@ -81,8 +81,8 @@ struct ShmRxDropState {
 static SHM_RX_DROPS: Mutex<BTreeMap<ZenohIdProto, ShmRxDropState>> = Mutex::new(BTreeMap::new());
 
 /// A peer's `(total, reported, last_report_ms)`, for tests only.
-#[cfg(test)]
-fn shm_rx_drop_state(peer: &ZenohIdProto) -> Option<(u64, u64, u64)> {
+#[cfg(any(test, feature = "test"))]
+pub fn shm_rx_drop_state(peer: &ZenohIdProto) -> Option<(u64, u64, u64)> {
     let drops = SHM_RX_DROPS.lock().unwrap_or_else(|e| e.into_inner());
     drops
         .get(peer)
