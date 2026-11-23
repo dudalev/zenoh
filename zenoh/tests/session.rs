@@ -33,7 +33,7 @@ use zenoh::{
 use zenoh_core::ztimeout;
 #[cfg(feature = "internal")]
 use zenoh_test::close_session;
-use zenoh_test::{get_locators_from_session, TestSessions};
+use zenoh_test::{get_locators_from_session, ScoutingGroup, TestSessions};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 const SLEEP: Duration = Duration::from_secs(1);
@@ -352,7 +352,9 @@ async fn zenoh_session_close_in_background_sync() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_undeclare_subscribers_same_keyexpr() {
     let key_expr = "test/undeclare/subscribers";
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    // LOCAL PATCH: scouting in a group of its own (BER-2469).
+    let group = ScoutingGroup::new();
+    let session = zenoh::open(group.config::<zenoh::Config>()).await.unwrap();
     let sub1 = session.declare_subscriber(key_expr).await.unwrap();
     let sub2 = session.declare_subscriber(key_expr).await.unwrap();
     tokio::time::sleep(SLEEP).await;
@@ -375,7 +377,9 @@ async fn test_querier_drop_pending_query_completion_callback_reentrancy() {
     use zenoh::{handlers::CallbackDrop, query::Reply, Wait};
 
     let key_expr = "test/querier/drop/pending/completion";
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    // LOCAL PATCH: scouting in a group of its own (BER-2469).
+    let group = ScoutingGroup::new();
+    let session = zenoh::open(group.config::<zenoh::Config>()).await.unwrap();
 
     // Queryable that keeps queries pending forever (never replies), so the
     // query is still in flight when the querier is dropped.

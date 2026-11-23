@@ -32,22 +32,39 @@
 //! // … run assertions …
 //! test_sessions.close().await;
 //! ```
+//!
+//! # Scouting
+//!
+//! A test that scouts does so in a [`ScoutingGroup`] of its own, so that it finds the
+//! sessions and routers it starts and no zenoh the host runs. A test whose subject needs a
+//! router runs the zenohd built from this workspace, through [`Zenohd`].
 
 use std::{
-    net::{TcpListener, UdpSocket},
-    time::Duration,
+    io::{BufRead, BufReader, Read},
+    net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket},
+    ops::DerefMut,
+    process::{Child, Command, Stdio},
+    sync::{
+        atomic::{AtomicU16, Ordering},
+        Arc, Mutex,
+    },
+    thread::JoinHandle,
+    time::{Duration, Instant},
 };
 
 #[cfg(feature = "internal")]
 use zenoh::internal::runtime::{Runtime, RuntimeBuilder};
 use zenoh::{Session, Wait};
-use zenoh_config::WhatAmI;
+use zenoh_config::{WhatAmI, ZenohId};
 use zenoh_core::ztimeout;
 use zenoh_link::EndPoint;
-use zenoh_protocol::core::EndPoints;
+use zenoh_protocol::core::{EndPoints, Parameters};
 
 /// Default timeout applied to async operations via [`ztimeout!`].
 pub const TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How often a wait below checks again.
+const POLL: Duration = Duration::from_millis(10);
 
 /// Binds to a random TCP port on loopback and returns the assigned port number.
 ///
@@ -67,6 +84,247 @@ pub fn get_free_tcp_port() -> u16 {
 pub fn get_free_udp_port() -> u16 {
     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
     socket.local_addr().unwrap().port()
+}
+
+/// The interface the tests' multicast uses, by name or by address: loopback, unless
+/// `ZENOH_TEST_MULTICAST_IFACE` names another.
+///
+/// Left to choose, a udp link joins its group on the first non-loopback multicast
+/// interface, so the host's network would decide the test (BER-2458).
+pub fn multicast_iface() -> String {
+    std::env::var("ZENOH_TEST_MULTICAST_IFACE").unwrap_or_else(|_| "127.0.0.1".to_string())
+}
+
+/// `endpoint`, joined on [`multicast_iface`] unless it names an interface itself.
+pub fn on_multicast_iface(endpoint: &str) -> String {
+    with_iface(endpoint, &multicast_iface())
+}
+
+/// `endpoint`, joined on `iface` unless it names an interface itself.
+fn with_iface(endpoint: &str, iface: &str) -> String {
+    let parsed: EndPoint = endpoint.parse().unwrap();
+    if parsed.config().get("iface").is_some() {
+        return endpoint.to_string();
+    }
+    let mut config = Parameters::from(parsed.config().as_str());
+    config.insert("iface", iface);
+    EndPoint::new(
+        parsed.protocol(),
+        parsed.address(),
+        parsed.metadata(),
+        config.as_str(),
+    )
+    .unwrap()
+    .to_string()
+}
+
+/// A multicast scouting group a test has to itself: `224.0.0.224` on a port no other live
+/// group has, joined on [`multicast_iface`].
+///
+/// A session that scouts in it finds the sessions and routers the test puts in it, and no
+/// zenoh the host runs in the default group, `224.0.0.224:7446` (BER-2469). Scouting stays
+/// on. Keep the group alive for as long as its sessions are.
+pub struct ScoutingGroup {
+    address: SocketAddr,
+    interface: String,
+    /// Holds the group's port on loopback, so that no other group is given it while this
+    /// one lives. A scouting socket binds the group's own address, so this does not stop
+    /// it.
+    _port: UdpSocket,
+}
+
+impl Default for ScoutingGroup {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ScoutingGroup {
+    pub fn new() -> Self {
+        let port = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let address = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(224, 0, 0, 224)),
+            port.local_addr().unwrap().port(),
+        );
+        Self {
+            address,
+            interface: multicast_iface(),
+            _port: port,
+        }
+    }
+
+    /// The group's multicast address.
+    pub fn address(&self) -> SocketAddr {
+        self.address
+    }
+
+    /// The interface the group is joined on.
+    pub fn interface(&self) -> &str {
+        &self.interface
+    }
+
+    /// Turns multicast scouting on in `config`, in this group.
+    pub fn apply(&self, config: &mut zenoh_config::Config) {
+        config.scouting.multicast.set_enabled(Some(true)).unwrap();
+        config
+            .scouting
+            .multicast
+            .set_address(Some(self.address))
+            .unwrap();
+        config
+            .scouting
+            .multicast
+            .set_interface(Some(self.interface.clone()))
+            .unwrap();
+    }
+
+    /// A default config, scouting in this group.
+    pub fn config<C>(&self) -> C
+    where
+        C: Default + DerefMut<Target = zenoh_config::Config>,
+    {
+        let mut config = C::default();
+        self.apply(&mut config);
+        config
+    }
+
+    /// The arguments that put a zenohd in this group.
+    pub fn zenohd_args(&self) -> [String; 4] {
+        [
+            "--cfg".to_string(),
+            format!("scouting/multicast/address:\"{}\"", self.address),
+            "--cfg".to_string(),
+            format!("scouting/multicast/interface:\"{}\"", self.interface),
+        ]
+    }
+}
+
+/// A zenohd in a [`ScoutingGroup`], started for one test and stopped with it.
+///
+/// `binary` must be the zenohd built from this workspace: an integration test of the
+/// `zenohd` package is given it as `env!("CARGO_BIN_EXE_zenohd")`, and cargo builds it for
+/// that run. A zenohd from anywhere else, such as the one installed on the host, would test
+/// a different router (BER-2469).
+pub struct Zenohd {
+    child: Mutex<Child>,
+    zid: ZenohId,
+    log: Arc<Mutex<String>>,
+    readers: Vec<JoinHandle<()>>,
+}
+
+impl Zenohd {
+    /// Starts `binary` in `group`, listening on a loopback port the OS picks, with no
+    /// plugins.
+    pub fn start(binary: &str, group: &ScoutingGroup) -> Self {
+        static STARTED: AtomicU16 = AtomicU16::new(0);
+        let zid: ZenohId = format!(
+            "{:x}{:04x}{:04x}",
+            std::process::id(),
+            group.address().port(),
+            STARTED.fetch_add(1, Ordering::Relaxed)
+        )
+        .parse()
+        .unwrap();
+        let mut child = Command::new(binary)
+            .args(["--id", &zid.to_string(), "-l", "tcp/127.0.0.1:0"])
+            .args(group.zenohd_args())
+            .args(["--cfg", "plugins_loading/enabled:false"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("cannot start {binary}: {e}"));
+        let log = Arc::new(Mutex::new(String::new()));
+        let readers = [
+            child.stdout.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
+            child.stderr.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|pipe| {
+            let log = log.clone();
+            std::thread::spawn(move || {
+                for line in BufReader::new(pipe).lines().map_while(Result::ok) {
+                    let mut log = log.lock().unwrap_or_else(|e| e.into_inner());
+                    log.push_str(&line);
+                    log.push('\n');
+                }
+            })
+        })
+        .collect();
+        Self {
+            child: Mutex::new(child),
+            zid,
+            log,
+            readers,
+        }
+    }
+
+    pub fn zid(&self) -> ZenohId {
+        self.zid
+    }
+
+    /// What the zenohd has logged so far.
+    pub fn log(&self) -> String {
+        self.log.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Waits until `session` has a transport to this zenohd. When a session opens, it may
+    /// not have found its router yet.
+    pub fn wait_linked(&self, session: &Session) {
+        let deadline = Instant::now() + TIMEOUT;
+        while !session.info().routers_zid().wait().any(|zid| zid == self.zid) {
+            let exited = self
+                .child
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .try_wait()
+                .unwrap();
+            assert!(
+                exited.is_none(),
+                "zenohd {} exited ({exited:?}) before {} linked to it; its log:\n{}",
+                self.zid,
+                session.zid(),
+                self.log()
+            );
+            assert!(
+                Instant::now() < deadline,
+                "{} did not link to zenohd {} within {TIMEOUT:?}; its log:\n{}",
+                session.zid(),
+                self.zid,
+                self.log()
+            );
+            std::thread::sleep(POLL);
+        }
+    }
+}
+
+impl Drop for Zenohd {
+    fn drop(&mut self) {
+        let child = self.child.get_mut().unwrap_or_else(|e| e.into_inner());
+        let _ = child.kill();
+        let _ = child.wait();
+        for reader in self.readers.drain(..) {
+            let _ = reader.join();
+        }
+        if std::thread::panicking() {
+            eprintln!("zenohd {} log:\n{}", self.zid, self.log());
+        }
+    }
+}
+
+/// Waits until `a` and `b` each have a transport to the other: two sessions that find each
+/// other by scouting may not have done so when they open.
+pub async fn wait_for_peers(a: &Session, b: &Session) {
+    ztimeout!(async {
+        while !(is_linked(a, &b.zid()).await && is_linked(b, &a.zid()).await) {
+            tokio::time::sleep(POLL).await;
+        }
+    });
+}
+
+async fn is_linked(session: &Session, peer: &ZenohId) -> bool {
+    session.info().peers_zid().await.any(|zid| &zid == peer)
 }
 
 /// Returns the first TCP [`EndPoint`] exposed by `session`.
@@ -277,12 +535,20 @@ impl TestSessions {
     }
 
     /// Opens two sessions joined via multicast on `endpoint` (e.g.
-    /// `"udp/224.0.0.1:0"`).
+    /// `"udp/224.0.0.1:0"`), on [`multicast_iface`] unless `endpoint` names an interface.
     ///
     /// The first session binds to port `0`; the second session then binds to
-    /// the resolved port so both share the same multicast group.
+    /// the resolved port, on the same interface, so both share the same multicast group.
     pub async fn open_pairs_multicast(&mut self, endpoint: &str) -> (Session, Session) {
-        let config = self.get_listener_config(endpoint, 1);
+        let endpoint = on_multicast_iface(endpoint);
+        let iface = endpoint
+            .parse::<EndPoint>()
+            .unwrap()
+            .config()
+            .get("iface")
+            .unwrap()
+            .to_string();
+        let config = self.get_listener_config(&endpoint, 1);
         let session01 = ztimeout!(zenoh::open(config.clone())).unwrap();
         self.listener_sessions.push(session01.clone());
         let locator = session01
@@ -293,6 +559,7 @@ impl TestSessions {
             .find(|l| l.protocol().as_str() == "udp")
             .expect("Expected at least one UDP locator")
             .to_string();
+        let locator = with_iface(&locator, &iface);
         println!("Connecting to {:?}", locator);
         let config = self.get_listener_config(&locator, 1);
         let session02 = ztimeout!(zenoh::open(config)).unwrap();

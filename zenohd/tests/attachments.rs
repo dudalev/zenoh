@@ -11,21 +11,28 @@
 // Contributors:
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
-use zenoh::{config::Config, Wait};
+//! LOCAL PATCH: upstream's `zenoh/tests/attachments.rs`, moved beside the zenohd built from
+//! this fork (BER-2469).
+//!
+//! Each test's session is a peer that scouts, in a scouting group the test has to itself,
+//! with that zenohd in it: the shape of the consumer, peers beside one zenohd per host.
+//! BER-2457, a query routed to a peer that had closed, only ever appeared with a router in
+//! the group. The test body starts once the session has its link to the router.
+use zenoh::{config::Config, Session, Wait};
+use zenoh_test::{ScoutingGroup, Zenohd};
 
-/// LOCAL PATCH: multicast scouting off, so that each test's session talks to itself and to
-/// no zenoh it finds on the host, an installed zenohd among them (BER-2457).
-fn config() -> Config {
-    let mut config = Config::default();
-    config
-        .insert_json5("scouting/multicast/enabled", "false")
-        .unwrap();
-    config
+/// A peer session in `group`, linked to `router`.
+fn open(group: &ScoutingGroup, router: &Zenohd) -> Session {
+    let session = zenoh::open(group.config::<Config>()).wait().unwrap();
+    router.wait_linked(&session);
+    session
 }
 
 #[test]
 fn attachment_pubsub() {
-    let zenoh = zenoh::open(config()).wait().unwrap();
+    let group = ScoutingGroup::new();
+    let router = Zenohd::start(env!("CARGO_BIN_EXE_zenohd"), &group);
+    let zenoh = open(&group, &router);
     const ATTACHMENT: &[u8] = b"pubsub attachment";
     zenoh
         .declare_subscriber("test/attachment")
@@ -52,7 +59,9 @@ fn attachment_pubsub() {
 
 #[test]
 fn attachment_queries() {
-    let zenoh = zenoh::open(config()).wait().unwrap();
+    let group = ScoutingGroup::new();
+    let router = Zenohd::start(env!("CARGO_BIN_EXE_zenohd"), &group);
+    let zenoh = open(&group, &router);
     const QUERY_ATTACHMENT: &[u8] = b"query attachment";
     const REPLY_ATTACHMENT: &[u8] = b"reply attachment";
     let _queryable = zenoh

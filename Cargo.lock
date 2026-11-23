@@ -5684,6 +5684,7 @@ dependencies = [
  "tracing-subscriber",
  "zenoh",
  "zenoh-config",
+ "zenoh-test",
  "zenoh-util",
 ]
 

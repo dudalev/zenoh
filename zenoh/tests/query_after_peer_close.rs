@@ -18,7 +18,10 @@
 //! answers, so the session routes its query there. When that peer closes, the query it
 //! held must finish at once, and so must the next query, answered by the session's own
 //! queryable alone: neither may wait out its timeout on the closed peer.
-#![cfg(all(feature = "test", feature = "transport_tcp"))]
+//!
+//! No router: the defect is the peer's own routing, so the session's scouting group is one
+//! the test has to itself, with nothing else in it.
+#![cfg(feature = "transport_tcp")]
 
 use std::{
     any::Any,
@@ -37,7 +40,7 @@ use zenoh_protocol::{
     network::{NetworkBodyMut, NetworkMessageMut},
 };
 use zenoh_result::ZResult;
-use zenoh_test::get_free_tcp_port;
+use zenoh_test::{get_free_tcp_port, ScoutingGroup};
 use zenoh_transport::{
     multicast::TransportMulticast, unicast::TransportUnicast, TransportEventHandler,
     TransportManager, TransportMulticastEventHandler, TransportPeer, TransportPeerEventHandler,
@@ -127,10 +130,8 @@ async fn a_query_is_not_routed_to_a_peer_that_has_closed() {
     ztimeout!(silent.add_listener(endpoint.parse().unwrap())).unwrap();
 
     // A peer session that knows nothing but the silent peer.
-    let mut config = Config::default();
-    config
-        .insert_json5("scouting/multicast/enabled", "false")
-        .unwrap();
+    let group = ScoutingGroup::new();
+    let mut config: Config = group.config();
     config
         .insert_json5("listen/endpoints", "[\"tcp/127.0.0.1:0\"]")
         .unwrap();

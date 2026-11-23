@@ -32,7 +32,7 @@ use zenoh::{
 use zenoh_buffers::ZBuf;
 use zenoh_core::ztimeout;
 use zenoh_shm::api::buffer::traits::OwnedShmBuf;
-use zenoh_test::TestSessions;
+use zenoh_test::{multicast_iface, ScoutingGroup, TestSessions};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 const SLEEP: Duration = Duration::from_secs(1);
@@ -67,14 +67,6 @@ async fn setup_shm_unicast<const NO_SHM_FOR_SECOND_PEER: bool>(
     let peer02 = test_context.open_connector_with_cfg(config).await;
 
     (peer01, peer02)
-}
-
-/// The interface the multicast tests join their group on: loopback, so that the host's
-/// firewall and routes cannot decide the outcome, unless `ZENOH_TEST_MULTICAST_IFACE` names
-/// another, by name or by address. Without one, the link picks the first non-loopback
-/// multicast interface (BER-2458).
-fn multicast_iface() -> String {
-    std::env::var("ZENOH_TEST_MULTICAST_IFACE").unwrap_or_else(|_| "127.0.0.1".to_string())
 }
 
 async fn setup_shm_multicast(test_context: &mut TestSessions) -> (Session, Session) {
@@ -245,8 +237,9 @@ async fn test_session_pubsub<const NO_SHM_FOR_SECOND_PEER: bool>(
 
 #[test]
 fn zenoh_shm_startup_init() {
-    // Open the sessions
-    let mut config = zenoh::Config::default();
+    // Open the sessions, scouting in a group of their own (LOCAL PATCH, BER-2469)
+    let group = ScoutingGroup::new();
+    let mut config: zenoh::Config = group.config();
     config
         .transport
         .shared_memory

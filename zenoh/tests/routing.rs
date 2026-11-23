@@ -28,7 +28,7 @@ use zenoh_config::{Config, ModeDependentValue, WhatAmIMatcher};
 use zenoh_core::ztimeout;
 use zenoh_link::EndPoint;
 use zenoh_result::bail;
-use zenoh_test::{get_free_tcp_port, get_tcp_locator};
+use zenoh_test::{get_free_tcp_port, get_tcp_locator, on_multicast_iface};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 const MSG_COUNT: usize = 50;
@@ -1228,7 +1228,8 @@ async fn three_node_combination_multicast() -> Result<()> {
                 idx += 1;
                 let port = get_free_tcp_port();
                 let unicast_locator = format!("tcp/127.0.0.1:{}", port);
-                let multicast_locator = format!("udp/224.0.0.1:{}", port);
+                // LOCAL PATCH: on the multicast interface of the tests (BER-2469, BER-2458).
+                let multicast_locator = on_multicast_iface(&format!("udp/224.0.0.1:{}", port));
 
                 let ke_pubsub = format!("three_node_combination_multicast_keyexpr_pubsub_{idx}");
 

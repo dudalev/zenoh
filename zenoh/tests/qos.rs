@@ -18,14 +18,19 @@ use zenoh::{
     qos::{CongestionControl, Priority},
 };
 use zenoh_core::ztimeout;
+use zenoh_test::{wait_for_peers, ScoutingGroup};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 const SLEEP: Duration = Duration::from_secs(1);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn qos_pubsub() {
-    let session1 = ztimeout!(zenoh::open(zenoh::Config::default())).unwrap();
-    let session2 = ztimeout!(zenoh::open(zenoh::Config::default())).unwrap();
+    // LOCAL PATCH: the two sessions find each other by scouting, in a group of their own
+    // (BER-2469).
+    let group = ScoutingGroup::new();
+    let session1 = ztimeout!(zenoh::open(group.config::<zenoh::Config>())).unwrap();
+    let session2 = ztimeout!(zenoh::open(group.config::<zenoh::Config>())).unwrap();
+    wait_for_peers(&session1, &session2).await;
 
     let publisher1 = ztimeout!(session1
         .declare_publisher("test/qos")
@@ -68,7 +73,7 @@ async fn qos_pubsub() {
 async fn qos_pubsub_overwrite_config() {
     use zenoh::{qos::Reliability, sample::Locality};
 
-    let qos_config_overwrite = zenoh::Config::from_json5(
+    let mut qos_config_overwrite = zenoh::Config::from_json5(
         r#"
         {
             qos: {
@@ -97,8 +102,13 @@ async fn qos_pubsub_overwrite_config() {
         "#,
     )
     .unwrap();
+    // LOCAL PATCH: the two sessions find each other by scouting, in a group of their own
+    // (BER-2469).
+    let group = ScoutingGroup::new();
+    group.apply(&mut qos_config_overwrite);
     let session1 = ztimeout!(zenoh::open(qos_config_overwrite)).unwrap();
-    let session2 = ztimeout!(zenoh::open(zenoh::Config::default())).unwrap();
+    let session2 = ztimeout!(zenoh::open(group.config::<zenoh::Config>())).unwrap();
+    wait_for_peers(&session1, &session2).await;
 
     let subscriber = ztimeout!(session2.declare_subscriber("test/qos_overwrite/**")).unwrap();
     tokio::time::sleep(SLEEP).await;

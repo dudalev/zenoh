@@ -64,7 +64,9 @@ impl Primitives for ReplyTestPrimitives {
 async fn test_reply_preserves_optimized_ke() {
     use crate::Config;
 
-    let session = ztimeout!(crate::open(Config::default())).unwrap();
+    // LOCAL PATCH: scouting in a group of its own (BER-2469).
+    let group = zenoh_test::ScoutingGroup::new();
+    let session = ztimeout!(crate::open(group.config::<Config>())).unwrap();
 
     let primitives = Arc::new(ReplyTestPrimitives::new());
 

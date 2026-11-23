@@ -23,6 +23,7 @@ use zenoh::{
     Session,
 };
 use zenoh_core::ztimeout;
+use zenoh_test::{wait_for_peers, ScoutingGroup};
 
 const SLEEP: Duration = Duration::from_millis(100);
 const TIMEOUT: Duration = Duration::from_secs(60);
@@ -285,8 +286,14 @@ async fn test_queryable_different_sessions() {
     zenoh::init_log_from_env_or("error");
 
     // Declare session
-    let s1 = ztimeout!(zenoh::open(zenoh::Config::default())).expect("Failed to open session s1");
-    let s2 = ztimeout!(zenoh::open(zenoh::Config::default())).expect("Failed to open session s2");
+    // LOCAL PATCH: the two sessions find each other by scouting, in a group of their own
+    // (BER-2469).
+    let group = ScoutingGroup::new();
+    let s1 = ztimeout!(zenoh::open(group.config::<zenoh::Config>()))
+        .expect("Failed to open session s1");
+    let s2 = ztimeout!(zenoh::open(group.config::<zenoh::Config>()))
+        .expect("Failed to open session s2");
+    wait_for_peers(&s1, &s2).await;
 
     test_queryable_impl(
         &s1,
@@ -304,8 +311,10 @@ async fn test_queryable_different_sessions() {
 async fn test_queryable_same_session() {
     zenoh::init_log_from_env_or("error");
 
-    // Declare session
-    let s1 = ztimeout!(zenoh::open(zenoh::Config::default())).expect("Failed to open session s1");
+    // Declare session, scouting in a group of its own (LOCAL PATCH, BER-2469)
+    let group = ScoutingGroup::new();
+    let s1 = ztimeout!(zenoh::open(group.config::<zenoh::Config>()))
+        .expect("Failed to open session s1");
 
     test_queryable_impl(&s1, &s1, "same session", "test/queryable/same_session").await;
 
@@ -321,8 +330,14 @@ async fn test_queryable_same_session() {
 async fn test_accept_replies() {
     zenoh::init_log_from_env_or("error");
 
-    let s1 = ztimeout!(zenoh::open(zenoh::Config::default())).expect("Failed to open session s1");
-    let s2 = ztimeout!(zenoh::open(zenoh::Config::default())).expect("Failed to open session s2");
+    // LOCAL PATCH: the two sessions find each other by scouting, in a group of their own
+    // (BER-2469).
+    let group = ScoutingGroup::new();
+    let s1 = ztimeout!(zenoh::open(group.config::<zenoh::Config>()))
+        .expect("Failed to open session s1");
+    let s2 = ztimeout!(zenoh::open(group.config::<zenoh::Config>()))
+        .expect("Failed to open session s2");
+    wait_for_peers(&s1, &s2).await;
     tokio::time::sleep(SLEEP).await;
     // -----------------------------------------------------------------------
     // 1. Default (MatchingQuery): queryable replies on the *same* key expression

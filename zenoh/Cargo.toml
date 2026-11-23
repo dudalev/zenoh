@@ -157,6 +157,10 @@ tracing-subscriber = { workspace = true }
 tracing-tunnel = { workspace = true }
 zenoh-protocol = { workspace = true, features = ["test"] }
 zenoh-test = { workspace = true, features = ["internal", "unstable"] }
+# LOCAL PATCH: tests that stand a bare transport beside a session build it with
+# `TransportManagerBuilder::build_test`, so they run in a plain `cargo test` too, not only
+# with zenoh's `test` feature.
+zenoh-transport = { workspace = true, features = ["test"] }
 
 [build-dependencies]
 rustc_version = { workspace = true }

@@ -18,7 +18,7 @@ use std::time::Duration;
 use zenoh_config::WhatAmI;
 use zenoh_core::ztimeout;
 use zenoh_link::EndPoint;
-use zenoh_test::get_locators_from_session;
+use zenoh_test::{get_locators_from_session, on_multicast_iface, ScoutingGroup};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_adminspace_wonly() {
@@ -73,6 +73,9 @@ async fn test_adminspace_read() {
     const TIMEOUT: Duration = Duration::from_secs(60);
 
     zenoh_util::init_log_from_env_or("error");
+    // LOCAL PATCH: the second router scouts in a group of its own, and each multicast
+    // listener joins its group on the multicast interface of the tests (BER-2469, BER-2458).
+    let group = ScoutingGroup::new();
 
     // Open router with dynamic TCP + UDP ports (port 0 → OS assigns)
     let router = {
@@ -82,7 +85,9 @@ async fn test_adminspace_read() {
             .endpoints
             .set(vec![
                 "tcp/127.0.0.1:0".parse::<EndPoint>().unwrap(),
-                "udp/224.0.0.224:0".parse::<EndPoint>().unwrap(),
+                on_multicast_iface("udp/224.0.0.224:0")
+                    .parse::<EndPoint>()
+                    .unwrap(),
             ])
             .unwrap();
         c.scouting.multicast.set_enabled(Some(false)).unwrap();
@@ -147,6 +152,7 @@ async fn test_adminspace_read() {
 
     let router2 = {
         let mut c = zenoh_config::Config::default();
+        group.apply(&mut c);
         c.set_mode(Some(WhatAmI::Router)).unwrap();
         c.listen.endpoints.set(vec![]).unwrap();
         c.connect
@@ -159,7 +165,12 @@ async fn test_adminspace_read() {
     let peer = {
         let mut c = zenoh_config::Config::default();
         c.set_mode(Some(WhatAmI::Peer)).unwrap();
-        c.listen.endpoints.set(vec![udp_locator.clone()]).unwrap();
+        c.listen
+            .endpoints
+            .set(vec![on_multicast_iface(&udp_locator.to_string())
+                .parse()
+                .unwrap()])
+            .unwrap();
         c.scouting.multicast.set_enabled(Some(false)).unwrap();
         ztimeout!(zenoh::open(c)).unwrap()
     };

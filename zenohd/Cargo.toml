@@ -71,6 +71,9 @@ zenoh-util = { workspace = true }
 
 [dev-dependencies]
 rand = { workspace = true, features = ["default"] }
+# LOCAL PATCH: `tests/` runs this package's own binary, `CARGO_BIN_EXE_zenohd`, as the
+# router in a test's private scouting group (BER-2469).
+zenoh-test = { workspace = true }
 
 [build-dependencies]
 rustc_version = { workspace = true }

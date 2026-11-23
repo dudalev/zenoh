@@ -14,10 +14,13 @@
 use std::{thread, time::Duration};
 
 use zenoh::{handlers::RingChannel, Config, Wait};
+use zenoh_test::ScoutingGroup;
 
 #[test]
 fn pubsub_with_ringbuffer() {
-    let zenoh = zenoh::open(Config::default()).wait().unwrap();
+    // LOCAL PATCH: scouting in a group of its own (BER-2469).
+    let group = ScoutingGroup::new();
+    let zenoh = zenoh::open(group.config::<Config>()).wait().unwrap();
     let sub = zenoh
         .declare_subscriber("test/ringbuffer")
         .with(RingChannel::new(3))
@@ -42,7 +45,9 @@ fn pubsub_with_ringbuffer() {
 
 #[test]
 fn query_with_ringbuffer() {
-    let zenoh = zenoh::open(Config::default()).wait().unwrap();
+    // LOCAL PATCH: scouting in a group of its own (BER-2469).
+    let group = ScoutingGroup::new();
+    let zenoh = zenoh::open(group.config::<Config>()).wait().unwrap();
     let queryable = zenoh
         .declare_queryable("test/ringbuffer_query")
         .with(RingChannel::new(1))

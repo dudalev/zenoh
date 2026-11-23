@@ -690,7 +690,9 @@ mod tests {
         const VALUE: &str = "zenoh";
 
         fn sample_kind_integrity_in_publication_with(kind: SampleKind) {
-            let session = open(Config::default()).wait().unwrap();
+            // LOCAL PATCH: scouting in a group of its own (BER-2469).
+            let group = zenoh_test::ScoutingGroup::new();
+            let session = open(group.config::<Config>()).wait().unwrap();
             let sub = session.declare_subscriber(KEY_EXPR).wait().unwrap();
             let pub_ = session.declare_publisher(KEY_EXPR).wait().unwrap();
 
@@ -718,7 +720,9 @@ mod tests {
         const VALUE: &str = "zenoh";
 
         fn sample_kind_integrity_in_put_builder_with(kind: SampleKind) {
-            let session = open(Config::default()).wait().unwrap();
+            // LOCAL PATCH: scouting in a group of its own (BER-2469).
+            let group = zenoh_test::ScoutingGroup::new();
+            let session = open(group.config::<Config>()).wait().unwrap();
             let sub = session.declare_subscriber(KEY_EXPR).wait().unwrap();
 
             match kind {

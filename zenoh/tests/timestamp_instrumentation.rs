@@ -26,7 +26,7 @@ use zenoh::{
     },
 };
 use zenoh_core::ztimeout;
-use zenoh_test::TestSessions;
+use zenoh_test::{ScoutingGroup, TestSessions};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 const SLEEP: Duration = Duration::from_secs(1);
@@ -192,7 +192,9 @@ async fn records_non_empty_timestamp_bytes() {
     let ke = "test/ts_instr/records/non_empty_ts";
     let instr = make_instrumentation(true, false, false);
 
-    let session = ztimeout!(zenoh::open(zenoh::Config::default())).unwrap();
+    // LOCAL PATCH: scouting in a group of its own (BER-2469).
+    let group = ScoutingGroup::new();
+    let session = ztimeout!(zenoh::open(group.config::<zenoh::Config>())).unwrap();
     let publisher = ztimeout!(session.declare_publisher(ke)).unwrap();
     let subscriber = ztimeout!(session.declare_subscriber(ke)).unwrap();
 
@@ -219,7 +221,9 @@ async fn sample_fields_keeps_timestamp_stack() {
     let ke = "test/ts_instr/records/sample_fields";
     let instr = make_instrumentation(true, false, false);
 
-    let session = ztimeout!(zenoh::open(zenoh::Config::default())).unwrap();
+    // LOCAL PATCH: scouting in a group of its own (BER-2469).
+    let group = ScoutingGroup::new();
+    let session = ztimeout!(zenoh::open(group.config::<zenoh::Config>())).unwrap();
     let publisher = ztimeout!(session.declare_publisher(ke)).unwrap();
     let subscriber = ztimeout!(session.declare_subscriber(ke)).unwrap();
 
@@ -302,7 +306,9 @@ async fn pubsub_same_session_send_only() {
     let ke = "test/ts_instr/same_session/send_only";
     let instr = make_instrumentation(true, false, false);
 
-    let session = ztimeout!(zenoh::open(zenoh::Config::default())).unwrap();
+    // LOCAL PATCH: scouting in a group of its own (BER-2469).
+    let group = ScoutingGroup::new();
+    let session = ztimeout!(zenoh::open(group.config::<zenoh::Config>())).unwrap();
     let publisher = ztimeout!(session.declare_publisher(ke)).unwrap();
     let subscriber = ztimeout!(session.declare_subscriber(ke)).unwrap();
 
@@ -325,7 +331,9 @@ async fn pubsub_same_session_receive_only() {
     let ke = "test/ts_instr/same_session/receive_only";
     let instr = make_instrumentation(false, false, true);
 
-    let session = ztimeout!(zenoh::open(zenoh::Config::default())).unwrap();
+    // LOCAL PATCH: scouting in a group of its own (BER-2469).
+    let group = ScoutingGroup::new();
+    let session = ztimeout!(zenoh::open(group.config::<zenoh::Config>())).unwrap();
     let publisher = ztimeout!(session.declare_publisher(ke)).unwrap();
     let subscriber = ztimeout!(session.declare_subscriber(ke)).unwrap();
 
@@ -348,7 +356,9 @@ async fn pubsub_same_session_send_receive() {
     let ke = "test/ts_instr/same_session/send_receive";
     let instr = make_instrumentation(true, false, true);
 
-    let session = ztimeout!(zenoh::open(zenoh::Config::default())).unwrap();
+    // LOCAL PATCH: scouting in a group of its own (BER-2469).
+    let group = ScoutingGroup::new();
+    let session = ztimeout!(zenoh::open(group.config::<zenoh::Config>())).unwrap();
     let publisher = ztimeout!(session.declare_publisher(ke)).unwrap();
     let subscriber = ztimeout!(session.declare_subscriber(ke)).unwrap();
 
@@ -371,7 +381,9 @@ async fn pubsub_same_session_no_instrumentation() {
     zenoh_util::init_log_from_env_or("error");
     let ke = "test/ts_instr/same_session/no_instr";
 
-    let session = ztimeout!(zenoh::open(zenoh::Config::default())).unwrap();
+    // LOCAL PATCH: scouting in a group of its own (BER-2469).
+    let group = ScoutingGroup::new();
+    let session = ztimeout!(zenoh::open(group.config::<zenoh::Config>())).unwrap();
     let publisher = ztimeout!(session.declare_publisher(ke)).unwrap();
     let subscriber = ztimeout!(session.declare_subscriber(ke)).unwrap();
 
@@ -1409,8 +1421,12 @@ async fn custom_callback_pub_sub() {
 
     let instr = make_instrumentation(true, false, false);
 
-    let session =
-        ztimeout!(zenoh::open(zenoh::Config::default()).with_timestamp_callback(cb)).unwrap();
+    // LOCAL PATCH: scouting in a group of its own (BER-2469).
+    let group = ScoutingGroup::new();
+    let session = ztimeout!(
+        zenoh::open(group.config::<zenoh::Config>()).with_timestamp_callback(cb)
+    )
+    .unwrap();
     let publisher = ztimeout!(session.declare_publisher(ke)).unwrap();
     let subscriber = ztimeout!(session.declare_subscriber(ke)).unwrap();
 
@@ -1540,8 +1556,12 @@ async fn custom_callback_context() {
 
     let instr = make_instrumentation(true, false, true);
 
-    let session =
-        ztimeout!(zenoh::open(zenoh::Config::default()).with_timestamp_callback(cb)).unwrap();
+    // LOCAL PATCH: scouting in a group of its own (BER-2469).
+    let group = ScoutingGroup::new();
+    let session = ztimeout!(
+        zenoh::open(group.config::<zenoh::Config>()).with_timestamp_callback(cb)
+    )
+    .unwrap();
     let expected_zid = session.zid();
 
     let publisher = ztimeout!(session.declare_publisher(ke)).unwrap();

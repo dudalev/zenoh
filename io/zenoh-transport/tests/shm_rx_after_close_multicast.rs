@@ -71,7 +71,7 @@ use zenoh_shm::{
     reader::ShmReader,
     ShmBufInner,
 };
-use zenoh_test::{get_free_tcp_port, get_free_udp_port};
+use zenoh_test::{get_free_tcp_port, get_free_udp_port, multicast_iface};
 use zenoh_transport::{
     common::shm::interop::shm_rx_drop_state, multicast::TransportMulticast,
     unicast::TransportUnicast, DummyTransportMulticastEventHandler, DummyTransportPeerEventHandler,
@@ -88,12 +88,6 @@ const POOL_SIZE: usize = 64 * 1024;
 const PROBE_SIZE: usize = 64;
 /// The multicast group, joined on `multicast_iface()`.
 const GROUP: &str = "224.0.0.1";
-
-/// The interface the group is joined on: loopback unless `ZENOH_TEST_MULTICAST_IFACE`
-/// names another, by name or by address.
-fn multicast_iface() -> String {
-    std::env::var("ZENOH_TEST_MULTICAST_IFACE").unwrap_or_else(|_| "127.0.0.1".to_string())
-}
 
 fn multicast_endpoint() -> EndPoint {
     format!(

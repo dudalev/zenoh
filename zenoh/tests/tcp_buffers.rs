@@ -13,10 +13,13 @@
 //
 
 use zenoh::{Config, Wait};
+use zenoh_test::ScoutingGroup;
 
 #[test]
 fn buffer_size_config() {
-    let mut config = Config::default();
+    // LOCAL PATCH: scouting in a group of its own (BER-2469).
+    let group = ScoutingGroup::new();
+    let mut config: Config = group.config();
     config
         .insert_json5(
             "transport/link/tcp",
@@ -38,7 +41,9 @@ fn buffer_size_config() {
 
 #[test]
 fn buffer_size_endpoint() {
-    let mut config = Config::default();
+    // LOCAL PATCH: scouting in a group of its own (BER-2469).
+    let group = ScoutingGroup::new();
+    let mut config: Config = group.config();
     config
         .insert_json5(
             "listen/endpoints",
@@ -51,7 +56,9 @@ fn buffer_size_endpoint() {
 
 #[test]
 fn buffer_size_endpoint_overwrite() {
-    let mut config = Config::default();
+    // LOCAL PATCH: scouting in a group of its own (BER-2469).
+    let group = ScoutingGroup::new();
+    let mut config: Config = group.config();
     config
         .insert_json5(
             "transport/link/tcp",
@@ -88,7 +95,9 @@ fn buffer_size_zero() {
 }
 
 fn listen_zero_buffers() {
-    let mut config = Config::default();
+    // LOCAL PATCH: scouting in a group of its own (BER-2469).
+    let group = ScoutingGroup::new();
+    let mut config: Config = group.config();
     config
         .insert_json5(
             "listen/endpoints",
