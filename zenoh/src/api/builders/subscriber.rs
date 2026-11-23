@@ -35,7 +35,9 @@ use crate::{
 /// # #[tokio::main]
 /// # async fn main() {
 ///
-/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # let config: zenoh::Config = group.config();
+/// let session = zenoh::open(config).await.unwrap();
 /// let subscriber = session
 ///     .declare_subscriber("key/expression")
 ///     .await
@@ -74,7 +76,9 @@ impl<'a, 'b> SubscriberBuilder<'a, 'b, DefaultHandler> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let subscriber = session
     ///     .declare_subscriber("key/expression")
     ///     .callback(|sample| { println!("Received: {} {:?}", sample.key_expr(), sample.payload()); })
@@ -100,7 +104,9 @@ impl<'a, 'b> SubscriberBuilder<'a, 'b, DefaultHandler> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let mut n = 0;
     /// let subscriber = session
     ///     .declare_subscriber("key/expression")
@@ -165,7 +171,9 @@ impl<'a, 'b> SubscriberBuilder<'a, 'b, Callback<Sample>> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// // no need to assign and keep a variable with a background subscriber
     /// session
     ///     .declare_subscriber("key/expression")

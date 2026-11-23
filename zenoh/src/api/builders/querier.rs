@@ -60,7 +60,9 @@ use crate::{
 /// # async fn main() {
 /// use zenoh::{query::{ConsolidationMode, QueryTarget}};
 ///
-/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # let config: zenoh::Config = group.config();
+/// let session = zenoh::open(config).await.unwrap();
 /// let querier = session.declare_querier("key/expression")
 ///     .target(QueryTarget::All)
 ///     .consolidation(ConsolidationMode::None)
@@ -221,7 +223,9 @@ impl IntoFuture for QuerierBuilder<'_, '_> {
 /// # async fn main() {
 /// use zenoh::{query::{ConsolidationMode, QueryTarget}};
 ///
-/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # let config: zenoh::Config = group.config();
+/// let session = zenoh::open(config).await.unwrap();
 /// let querier = session.declare_querier("key/expression")
 ///     .target(QueryTarget::All)
 ///     .consolidation(ConsolidationMode::None)
@@ -264,7 +268,9 @@ impl<Handler> CancellationTokenBuilderTrait for QuerierGetBuilder<'_, '_, Handle
     /// # async fn main() {
     /// use zenoh::{query::{ConsolidationMode, QueryTarget}};
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let querier = session.declare_querier("key/expression")
     ///     .target(QueryTarget::All)
     ///     .consolidation(ConsolidationMode::None)
@@ -354,7 +360,9 @@ impl<'a, 'b> QuerierGetBuilder<'a, 'b, DefaultHandler> {
     /// # async fn main() {
     /// use zenoh::{query::{ConsolidationMode, QueryTarget}};
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let querier = session.declare_querier("key/expression")
     ///     .target(QueryTarget::All)
     ///     .consolidation(ConsolidationMode::None)
@@ -386,7 +394,9 @@ impl<'a, 'b> QuerierGetBuilder<'a, 'b, DefaultHandler> {
     /// # async fn main() {
     /// use zenoh::{query::{ConsolidationMode, QueryTarget}};
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let querier = session.declare_querier("key/expression")
     ///     .target(QueryTarget::All)
     ///     .consolidation(ConsolidationMode::None)
@@ -416,7 +426,9 @@ impl<'a, 'b> QuerierGetBuilder<'a, 'b, DefaultHandler> {
     /// # async fn main() {
     /// use zenoh::{query::{ConsolidationMode, QueryTarget}};
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let querier = session.declare_querier("key/expression")
     ///     .target(QueryTarget::All)
     ///     .consolidation(ConsolidationMode::None)

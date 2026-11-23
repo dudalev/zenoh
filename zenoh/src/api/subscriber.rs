@@ -65,7 +65,9 @@ pub(crate) struct SubscriberInner {
 /// ```
 /// # #[tokio::main]
 /// # async fn main() {
-/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # let config: zenoh::Config = group.config();
+/// let session = zenoh::open(config).await.unwrap();
 /// let subscriber = session
 ///     .declare_subscriber("key/expression")
 ///     .await
@@ -183,7 +185,9 @@ impl<Handler> Subscriber<Handler> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let subscriber = session.declare_subscriber("key/expression")
     ///     .await
     ///     .unwrap();
@@ -228,7 +232,9 @@ impl<Handler> Subscriber<Handler> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let subscriber = session.declare_subscriber("key/expression")
     ///     .await
     ///     .unwrap();

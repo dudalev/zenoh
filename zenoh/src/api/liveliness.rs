@@ -48,7 +48,9 @@ use crate::api::{
 /// # #[tokio::main]
 /// # async fn main() {
 ///
-/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # let config: zenoh::Config = group.config();
+/// let session = zenoh::open(config).await.unwrap();
 /// let liveliness = session
 ///     .liveliness()
 ///     .declare_token("key/expression")
@@ -62,7 +64,9 @@ use crate::api::{
 /// # #[tokio::main]
 /// # async fn main() {
 ///
-/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # let config: zenoh::Config = group.config();
+/// let session = zenoh::open(config).await.unwrap();
 /// let replies = session.liveliness().get("key/**").await.unwrap();
 /// while let Ok(reply) = replies.recv_async().await {
 ///     if let Ok(sample) = reply.result() {
@@ -110,7 +114,9 @@ impl<'a> Liveliness<'a> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let liveliness = session
     ///     .liveliness()
     ///     .declare_token("key/expression")
@@ -181,7 +187,9 @@ impl<'a> Liveliness<'a> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let replies = session.liveliness().get("key/expression").await.unwrap();
     /// while let Ok(reply) = replies.recv_async().await {
     ///     if let Ok(sample) = reply.result() {
@@ -249,7 +257,9 @@ pub struct LivelinessToken {
 /// # #[tokio::main]
 /// # async fn main() {
 ///
-/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # let config: zenoh::Config = group.config();
+/// let session = zenoh::open(config).await.unwrap();
 /// let liveliness = session
 ///     .liveliness()
 ///     .declare_token("key/expression")
@@ -290,7 +300,9 @@ impl LivelinessToken {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let liveliness = session
     ///     .liveliness()
     ///     .declare_token("key/expression")

@@ -81,7 +81,9 @@ impl fmt::Debug for PublisherState {
 /// # #[tokio::main]
 /// # async fn main() {
 ///
-/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # let config: zenoh::Config = group.config();
+/// let session = zenoh::open(config).await.unwrap();
 /// let publisher = session.declare_publisher("key/expression").await.unwrap();
 /// publisher.put("value").await.unwrap();
 /// # format!("{publisher:?}");
@@ -96,7 +98,9 @@ impl fmt::Debug for PublisherState {
 /// # async fn main() {
 /// use futures::StreamExt;
 ///
-/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # let config: zenoh::Config = group.config();
+/// let session = zenoh::open(config).await.unwrap();
 /// let mut subscriber = session.declare_subscriber("key/expression").await.unwrap();
 /// let publisher = session.declare_publisher("another/key/expression").await.unwrap();
 /// # tokio::task::spawn(async move {
@@ -131,7 +135,9 @@ impl<'a> Publisher<'a> {
     /// ```
     /// # #[tokio::main]
     /// # async fn main() {
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let publisher = session.declare_publisher("key/expression")
     ///     .await
     ///     .unwrap();
@@ -153,7 +159,9 @@ impl<'a> Publisher<'a> {
     /// ```
     /// # #[tokio::main]
     /// # async fn main() {
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let publisher = session.declare_publisher("key/expression")
     ///     .await
     ///     .unwrap();
@@ -171,7 +179,9 @@ impl<'a> Publisher<'a> {
     /// ```
     /// # #[tokio::main]
     /// # async fn main() {
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let publisher = session.declare_publisher("key/expression")
     ///     .await
     ///     .unwrap();
@@ -189,7 +199,9 @@ impl<'a> Publisher<'a> {
     /// ```
     /// # #[tokio::main]
     /// # async fn main() {
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let publisher = session.declare_publisher("key/expression")
     ///     .await
     ///     .unwrap();
@@ -207,7 +219,9 @@ impl<'a> Publisher<'a> {
     /// ```
     /// # #[tokio::main]
     /// # async fn main() {
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let publisher = session.declare_publisher("key/expression")
     ///     .await
     ///     .unwrap();
@@ -225,7 +239,9 @@ impl<'a> Publisher<'a> {
     /// ```
     /// # #[tokio::main]
     /// # async fn main() {
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let publisher = session.declare_publisher("key/expression")
     ///     .await
     ///     .unwrap();
@@ -249,7 +265,9 @@ impl<'a> Publisher<'a> {
     /// ```
     /// # #[tokio::main]
     /// # async fn main() {
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let publisher = session.declare_publisher("key/expression").await.unwrap();
     /// publisher.put("value").await.unwrap();
     /// # }
@@ -285,7 +303,9 @@ impl<'a> Publisher<'a> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let publisher = session.declare_publisher("key/expression").await.unwrap();
     /// publisher.delete().await.unwrap();
     /// # }
@@ -313,7 +333,9 @@ impl<'a> Publisher<'a> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let publisher = session.declare_publisher("key/expression").await.unwrap();
     /// let matching_subscribers: bool = publisher
     ///     .matching_status()
@@ -373,7 +395,9 @@ impl<'a> Publisher<'a> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let publisher = session.declare_publisher("key/expression").await.unwrap();
     /// publisher.undeclare().await.unwrap();
     /// # }
@@ -416,7 +440,9 @@ impl<'a> UndeclarableSealed<()> for Publisher<'a> {
 /// # #[tokio::main]
 /// # async fn main() {
 ///
-/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # let config: zenoh::Config = group.config();
+/// let session = zenoh::open(config).await.unwrap();
 /// let publisher = session.declare_publisher("key/expression").await.unwrap();
 /// publisher.undeclare().await.unwrap();
 /// # }

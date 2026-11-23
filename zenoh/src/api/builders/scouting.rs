@@ -58,7 +58,9 @@ impl ScoutBuilder<DefaultHandler> {
     /// # async fn main() {
     /// use zenoh::config::WhatAmI;
     ///
-    /// let scout = zenoh::scout(WhatAmI::Peer | WhatAmI::Router, zenoh::Config::default())
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let scout = zenoh::scout(WhatAmI::Peer | WhatAmI::Router, config)
     ///     .callback(|hello| { println!("{}", hello); })
     ///     .await
     ///     .unwrap();
@@ -84,7 +86,9 @@ impl ScoutBuilder<DefaultHandler> {
     /// use zenoh::config::WhatAmI;
     ///
     /// let mut n = 0;
-    /// let scout = zenoh::scout(WhatAmI::Peer | WhatAmI::Router, zenoh::Config::default())
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let scout = zenoh::scout(WhatAmI::Peer | WhatAmI::Router, config)
     ///     .callback_mut(move |_hello| { n += 1; })
     ///     .await
     ///     .unwrap();

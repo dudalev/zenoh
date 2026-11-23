@@ -43,7 +43,9 @@ impl CallbackParameter for Hello {
 /// # async fn main() {
 /// use zenoh::config::WhatAmI;
 ///
-/// let scout = zenoh::scout(WhatAmI::Peer | WhatAmI::Router, zenoh::Config::default())
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # let config: zenoh::Config = group.config();
+/// let scout = zenoh::scout(WhatAmI::Peer | WhatAmI::Router, config)
 ///     .callback(|hello| { println!("{}", hello); })
 ///     .await
 ///     .unwrap();
@@ -63,7 +65,9 @@ impl ScoutInner {
     /// # async fn main() {
     /// use zenoh::config::WhatAmI;
     ///
-    /// let scout = zenoh::scout(WhatAmI::Peer | WhatAmI::Router, zenoh::Config::default())
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let scout = zenoh::scout(WhatAmI::Peer | WhatAmI::Router, config)
     ///     .callback(|hello| { println!("{}", hello); })
     ///     .await
     ///     .unwrap();

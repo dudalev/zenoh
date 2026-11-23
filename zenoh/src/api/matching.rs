@@ -39,7 +39,9 @@ use crate::api::{cancellation::SyncGroup, handlers::CallbackParameter};
 /// # #[tokio::main]
 /// # async fn main() {
 ///
-/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # let config: zenoh::Config = group.config();
+/// let session = zenoh::open(config).await.unwrap();
 /// let publisher = session.declare_publisher("key/expression").await.unwrap();
 /// let matching_status = publisher.matching_status().await.unwrap();
 /// # }
@@ -71,7 +73,9 @@ impl MatchingStatus {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let publisher = session.declare_publisher("key/expression").await.unwrap();
     /// let matching_subscribers: bool = publisher
     ///     .matching_status()
@@ -177,7 +181,9 @@ impl<Handler> MatchingListener<Handler> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let publisher = session.declare_publisher("key/expression").await.unwrap();
     /// let matching_listener = publisher.matching_listener().await.unwrap();
     /// matching_listener.undeclare().await.unwrap();

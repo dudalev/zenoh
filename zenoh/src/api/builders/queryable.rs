@@ -36,7 +36,9 @@ use crate::{
 /// ```
 /// # #[tokio::main]
 /// # async fn main() {
-/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # let config: zenoh::Config = group.config();
+/// let session = zenoh::open(config).await.unwrap();
 /// let queryable = session.declare_queryable("key/expression").await.unwrap();
 /// # }
 /// ```
@@ -58,7 +60,9 @@ impl<'a, 'b> QueryableBuilder<'a, 'b, DefaultHandler> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let queryable = session
     ///     .declare_queryable("key/expression")
     ///     .callback(|query| {println!(">> Handling query '{}'", query.selector());})
@@ -84,7 +88,9 @@ impl<'a, 'b> QueryableBuilder<'a, 'b, DefaultHandler> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let mut n = 0;
     /// let queryable = session
     ///     .declare_queryable("key/expression")
@@ -151,7 +157,9 @@ impl<'a, 'b> QueryableBuilder<'a, 'b, Callback<Query>> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// // no need to assign and keep a variable with a background queryable
     /// session
     ///     .declare_queryable("key/expression")

@@ -88,7 +88,9 @@ pub struct PublicationBuilderDelete;
 /// # async fn main() {
 /// use zenoh::{bytes::Encoding, qos::CongestionControl};
 ///
-/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # let config: zenoh::Config = group.config();
+/// let session = zenoh::open(config).await.unwrap();
 /// session
 ///     .put("key/expression", "payload")
 ///     .encoding(Encoding::TEXT_PLAIN)
@@ -322,7 +324,9 @@ impl IntoFuture for PublicationBuilder<PublisherBuilder<'_, '_>, PublicationBuil
 /// # async fn main() {
 /// use zenoh::qos::CongestionControl;
 ///
-/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # let config: zenoh::Config = group.config();
+/// let session = zenoh::open(config).await.unwrap();
 /// let publisher = session
 ///     .declare_publisher("key/expression")
 ///     .congestion_control(CongestionControl::Block)

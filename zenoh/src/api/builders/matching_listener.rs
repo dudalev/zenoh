@@ -56,7 +56,9 @@ impl<'a> MatchingListenerBuilder<'a, DefaultHandler> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let publisher = session.declare_publisher("key/expression").await.unwrap();
     /// let matching_listener = publisher
     ///     .matching_listener()
@@ -87,7 +89,9 @@ impl<'a> MatchingListenerBuilder<'a, DefaultHandler> {
     /// # async fn main() {
     ///
     /// let mut n = 0;
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let publisher = session.declare_publisher("key/expression").await.unwrap();
     /// let matching_listener = publisher
     ///     .matching_listener()
@@ -157,7 +161,9 @@ impl<'a> MatchingListenerBuilder<'a, Callback<MatchingStatus>> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let publisher = session.declare_publisher("key/expression").await.unwrap();
     /// // no need to assign and keep a variable for a background listener
     /// publisher

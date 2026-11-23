@@ -67,7 +67,9 @@ pub(crate) struct QuerierState {
 /// # #[tokio::main]
 /// # async fn main() {
 ///
-/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # let config: zenoh::Config = group.config();
+/// let session = zenoh::open(config).await.unwrap();
 /// let querier = session.declare_querier("key/expression").await.unwrap();
 /// let replies = querier.get().await.unwrap();
 /// # }
@@ -105,7 +107,9 @@ impl<'a> Querier<'a> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let querier = session.declare_querier("key/expression")
     ///     .await
     ///     .unwrap();
@@ -158,7 +162,9 @@ impl<'a> Querier<'a> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let querier = session.declare_querier("key/expression").await.unwrap();
     /// let replies = querier.get();
     /// # }
@@ -187,7 +193,9 @@ impl<'a> Querier<'a> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let querier = session.declare_querier("key/expression").await.unwrap();
     /// querier.undeclare().await.unwrap();
     /// # }
@@ -216,7 +224,9 @@ impl<'a> Querier<'a> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let querier = session.declare_querier("key/expression").await.unwrap();
     /// let matching_queriers: bool = querier
     ///     .matching_status()
@@ -295,7 +305,9 @@ impl<'a> UndeclarableSealed<()> for Querier<'a> {
 /// # #[tokio::main]
 /// # async fn main() {
 ///
-/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # let config: zenoh::Config = group.config();
+/// let session = zenoh::open(config).await.unwrap();
 /// let querier = session.declare_querier("key/expression").await.unwrap();
 /// querier.undeclare().await.unwrap();
 /// # }

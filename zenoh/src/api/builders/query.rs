@@ -56,7 +56,9 @@ use crate::{
 /// # async fn main() {
 /// use zenoh::{query::{ConsolidationMode, QueryTarget}};
 ///
-/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # let config: zenoh::Config = group.config();
+/// let session = zenoh::open(config).await.unwrap();
 /// let replies = session
 ///     .get("key/expression?value>1")
 ///     .target(QueryTarget::All)
@@ -172,7 +174,9 @@ impl<Handler> CancellationTokenBuilderTrait for SessionGetBuilder<'_, '_, Handle
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let ct = zenoh::cancellation::CancellationToken::default();
     /// let query = session
     ///     .get("key/expression")
@@ -207,7 +211,9 @@ impl<'a, 'b> SessionGetBuilder<'a, 'b, DefaultHandler> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let queryable = session
     ///     .get("key/expression")
     ///     .callback(|reply| {println!("Received {:?}", reply.result());})
@@ -233,7 +239,9 @@ impl<'a, 'b> SessionGetBuilder<'a, 'b, DefaultHandler> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let mut n = 0;
     /// let queryable = session
     ///     .get("key/expression")
@@ -257,7 +265,9 @@ impl<'a, 'b> SessionGetBuilder<'a, 'b, DefaultHandler> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let replies = session
     ///     .get("key/expression")
     ///     .with(flume::bounded(32))

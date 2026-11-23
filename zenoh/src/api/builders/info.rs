@@ -30,7 +30,9 @@ use crate::net::runtime::DynamicRuntime;
 /// ```
 /// # #[tokio::main]
 /// # async fn main() {
-/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # let config: zenoh::Config = group.config();
+/// let session = zenoh::open(config).await.unwrap();
 /// let zid = session.info().zid().await;
 /// # }
 /// ```
@@ -79,7 +81,9 @@ impl IntoFuture for ZenohIdBuilder<'_> {
 /// # #[tokio::main]
 /// # async fn main() {
 ///
-/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # let config: zenoh::Config = group.config();
+/// let session = zenoh::open(config).await.unwrap();
 /// let mut routers_zid = session.info().routers_zid().await;
 /// while let Some(router_zid) = routers_zid.next() {}
 /// # }
@@ -128,7 +132,9 @@ impl IntoFuture for RoutersZenohIdBuilder<'_> {
 /// # #[tokio::main]
 /// # async fn main() {
 ///
-/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # let config: zenoh::Config = group.config();
+/// let session = zenoh::open(config).await.unwrap();
 /// let zid = session.info().zid().await;
 /// let mut peers_zid = session.info().peers_zid().await;
 /// while let Some(peer_zid) = peers_zid.next() {}

@@ -193,7 +193,9 @@ impl Query {
     /// ```
     /// # #[tokio::main]
     /// # async fn main() {
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let queryable = session
     ///     .declare_queryable("key/expression")
     ///     .callback(move |query| { println!("{}", query.selector()); })
@@ -212,7 +214,9 @@ impl Query {
     /// ```
     /// # #[tokio::main]
     /// # async fn main() {
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let queryable = session
     ///     .declare_queryable("key/expression")
     ///     .callback(move |query| { println!("{}", query.key_expr()); })
@@ -231,7 +235,9 @@ impl Query {
     /// ```
     /// # #[tokio::main]
     /// # async fn main() {
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let queryable = session
     ///     .declare_queryable("key/expression")
     ///     .callback(move |query| { println!("{}", query.parameters()); })
@@ -251,7 +257,9 @@ impl Query {
     /// # use zenoh::bytes::ZBytes;
     /// # #[tokio::main]
     /// # async fn main() {
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let queryable = session
     ///     .declare_queryable("key/expression")
     ///     .callback(move |query| {
@@ -273,7 +281,9 @@ impl Query {
     /// # use zenoh::bytes::ZBytes;
     /// # #[tokio::main]
     /// # async fn main() {
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let queryable = session
     ///     .declare_queryable("key/expression")
     ///     .callback(move |mut query| {
@@ -294,7 +304,9 @@ impl Query {
     /// ```
     /// # #[tokio::main]
     /// # async fn main() {
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let queryable = session
     ///     .declare_queryable("key/expression")
     ///     .callback(move |query| { println!("{:?}", query.encoding()); })
@@ -314,7 +326,9 @@ impl Query {
     /// # use zenoh::bytes::ZBytes;
     /// # #[tokio::main]
     /// # async fn main() {
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let queryable = session
     ///     .declare_queryable("key/expression")
     ///     .callback(move |query| {
@@ -335,7 +349,9 @@ impl Query {
     /// # use zenoh::bytes::ZBytes;
     /// # #[tokio::main]
     /// # async fn main() {
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let queryable = session
     ///     .declare_queryable("key/expression")
     ///     .callback(move |mut query| {
@@ -375,7 +391,9 @@ impl Query {
     /// # use zenoh::sample::Sample;
     /// # #[tokio::main]
     /// # async fn main() {
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let queryable = session
     ///     .declare_queryable("key/expression")
     ///     .callback(move |query| { query.reply_sample(Sample::empty()); })
@@ -456,7 +474,9 @@ impl Query {
     /// ```
     /// # #[tokio::main]
     /// # async fn main() {
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let queryable = session
     ///     .declare_queryable("key/expression")
     ///     .callback(move |query| { query.accepts_replies(); })
@@ -677,7 +697,9 @@ pub(crate) struct QueryableInner {
 /// # #[tokio::main]
 /// # async fn main() {
 ///
-/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # let config: zenoh::Config = group.config();
+/// let session = zenoh::open(config).await.unwrap();
 /// let queryable = session.declare_queryable("key/expression").await.unwrap();
 /// queryable.undeclare().await.unwrap();
 /// # }
@@ -748,7 +770,9 @@ impl<Handler> IntoFuture for QueryableUndeclaration<Handler> {
 /// # async fn main() {
 /// use futures::prelude::*;
 ///
-/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # let config: zenoh::Config = group.config();
+/// let session = zenoh::open(config).await.unwrap();
 /// let queryable = session
 ///     .declare_queryable("key/expression")
 ///     .callback(move |query| {
@@ -807,7 +831,9 @@ impl<Handler> Queryable<Handler> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let queryable = session.declare_queryable("key/expression").await.unwrap();
     /// let queryable_id = queryable.id();
     /// # }
@@ -830,7 +856,9 @@ impl<Handler> Queryable<Handler> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let queryable = session.declare_queryable("key/expression").await.unwrap();
     /// let handler = queryable.handler();
     /// # }
@@ -848,7 +876,9 @@ impl<Handler> Queryable<Handler> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let mut queryable = session.declare_queryable("key/expression").await.unwrap();
     /// let handler = queryable.handler_mut();
     /// # }
@@ -864,7 +894,9 @@ impl<Handler> Queryable<Handler> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let queryable = session.declare_queryable("key/expression").await.unwrap();
     /// queryable.undeclare().await.unwrap();
     /// # }
@@ -890,7 +922,9 @@ impl<Handler> Queryable<Handler> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let mut queryable = session.declare_queryable("key/expression").await.unwrap();
     /// queryable.set_background(true);
     /// # }
@@ -907,7 +941,9 @@ impl<Handler> Queryable<Handler> {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let queryable = session.declare_queryable("key/expression")
     ///     .await
     ///     .unwrap();

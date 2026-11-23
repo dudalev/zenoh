@@ -34,6 +34,8 @@ pub trait SessionExt {
     ///
     /// let mut config = zenoh::Config::default();
     /// config.timestamping.set_enabled(Some(Unique(true)));
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # group.apply(&mut config);
     /// let session = zenoh::open(config).await.unwrap();
     /// let publication_cache = session.declare_publication_cache("key/expression").await.unwrap();
     /// tokio::task::spawn(async move {

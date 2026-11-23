@@ -152,7 +152,9 @@ impl OnCancelHandlers {
 /// # #[tokio::main]
 /// # async fn main() {
 ///
-/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # let config: zenoh::Config = group.config();
+/// let session = zenoh::open(config).await.unwrap();
 /// let mut n = 0;
 /// let cancellation_token = zenoh::cancellation::CancellationToken::default();
 /// let queryable = session

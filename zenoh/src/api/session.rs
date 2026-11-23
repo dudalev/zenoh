@@ -790,7 +790,9 @@ impl fmt::Debug for SessionInner {
 /// ```
 /// # #[tokio::main]
 /// # async fn main() {
-/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # let config: zenoh::Config = group.config();
+/// let session = zenoh::open(config).await.unwrap();
 /// session.put("key/expression", "value").await.unwrap();
 /// # }
 /// ```
@@ -1006,7 +1008,9 @@ impl Session {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// assert!(!session.is_closed());
     /// session.close().await.unwrap();
     /// assert!(session.is_closed());
@@ -1022,7 +1026,9 @@ impl Session {
     /// ```
     /// # #[tokio::main]
     /// # async fn main() {
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let keyexpr = session.declare_keyexpr("key/expression").await.unwrap();
     /// let subscriber = session
     ///     .declare_subscriber(&keyexpr)
@@ -1051,7 +1057,9 @@ impl Session {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let peers = session.config().get("connect/endpoints").unwrap();
     /// # }
     /// ```
@@ -1070,7 +1078,9 @@ impl Session {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let timestamp = session.new_timestamp();
     /// # }
     /// ```
@@ -1095,7 +1105,9 @@ impl Session {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let info = session.info();
     /// # }
     /// ```
@@ -1122,7 +1134,9 @@ impl Session {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let shm_provider = session.get_shm_provider();
     /// assert!(shm_provider.into_option().is_none());
     /// std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1228,7 +1242,9 @@ impl Session {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let publisher = session.declare_publisher("key/expression")
     ///     .await
     ///     .unwrap();
@@ -1267,7 +1283,9 @@ impl Session {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let querier = session.declare_querier("key/expression")
     ///     .await
     ///     .unwrap();
@@ -1302,7 +1320,9 @@ impl Session {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let liveliness = session
     ///     .liveliness()
     ///     .declare_token("key/expression")
@@ -1326,7 +1346,9 @@ impl Session {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let key_expr = session.declare_keyexpr("key/expression").await.unwrap();
     /// # }
     /// ```
@@ -1361,7 +1383,9 @@ impl Session {
     /// # async fn main() {
     /// use zenoh::bytes::Encoding;
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// session
     ///     .put("key/expression", "payload")
     ///     .encoding(Encoding::TEXT_PLAIN)
@@ -1407,7 +1431,9 @@ impl Session {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// session.delete("key/expression").await.unwrap();
     /// # }
     /// ```
@@ -1447,7 +1473,9 @@ impl Session {
     /// # #[tokio::main]
     /// # async fn main() {
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let replies = session.get("key/expression").await.unwrap();
     /// while let Ok(reply) = replies.recv_async().await {
     ///     println!(">> Received {:?}", reply.result());
@@ -3721,7 +3749,9 @@ impl crate::net::primitives::EPrimitives for WeakSession {
 /// # #[tokio::main]
 /// # async fn main() {
 ///
-/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # let config: zenoh::Config = group.config();
+/// let session = zenoh::open(config).await.unwrap();
 /// # }
 /// ```
 ///
@@ -3736,6 +3766,10 @@ impl crate::net::primitives::EPrimitives for WeakSession {
 /// config.connect.endpoints.set(
 ///     ["tcp/10.10.10.10:7447", "tcp/11.11.11.11:7447"].iter().map(|s|s.parse().unwrap()).collect());
 ///
+/// # // As a test it dials nothing, and scouts a group of its own.
+/// # config.connect.endpoints.set(Vec::new()).unwrap();
+/// # let group = zenoh_test::ScoutingGroup::new();
+/// # group.apply(&mut config);
 /// let session = zenoh::open(config).await.unwrap();
 /// # }
 /// ```

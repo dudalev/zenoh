@@ -558,7 +558,9 @@ impl<'a> AdvancedPublisher<'a> {
     /// # async fn main() {
     /// use zenoh_ext::AdvancedPublisherBuilderExt;
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let publisher = session.declare_publisher("key/expression").advanced().await.unwrap();
     /// publisher.put("value").await.unwrap();
     /// # }
@@ -601,7 +603,9 @@ impl<'a> AdvancedPublisher<'a> {
     /// # async fn main() {
     /// use zenoh_ext::AdvancedPublisherBuilderExt;
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let publisher = session.declare_publisher("key/expression").advanced().await.unwrap();
     /// publisher.delete().await.unwrap();
     /// # }
@@ -637,7 +641,9 @@ impl<'a> AdvancedPublisher<'a> {
     /// # async fn main() {
     /// use zenoh_ext::AdvancedPublisherBuilderExt;
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let publisher = session.declare_publisher("key/expression").advanced().await.unwrap();
     /// let matching_subscribers: bool = publisher
     ///     .matching_status()
@@ -693,7 +699,9 @@ impl<'a> AdvancedPublisher<'a> {
     /// # async fn main() {
     /// use zenoh_ext::AdvancedPublisherBuilderExt;
     ///
-    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// # let group = zenoh_test::ScoutingGroup::new();
+    /// # let config: zenoh::Config = group.config();
+    /// let session = zenoh::open(config).await.unwrap();
     /// let publisher = session.declare_publisher("key/expression").advanced().await.unwrap();
     /// publisher.undeclare().await.unwrap();
     /// # }
