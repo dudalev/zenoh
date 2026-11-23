@@ -289,10 +289,10 @@ async fn test_queryable_different_sessions() {
     // LOCAL PATCH: the two sessions find each other by scouting, in a group of their own
     // (BER-2469).
     let group = ScoutingGroup::new();
-    let s1 = ztimeout!(zenoh::open(group.config::<zenoh::Config>()))
-        .expect("Failed to open session s1");
-    let s2 = ztimeout!(zenoh::open(group.config::<zenoh::Config>()))
-        .expect("Failed to open session s2");
+    let s1 =
+        ztimeout!(zenoh::open(group.config::<zenoh::Config>())).expect("Failed to open session s1");
+    let s2 =
+        ztimeout!(zenoh::open(group.config::<zenoh::Config>())).expect("Failed to open session s2");
     wait_for_peers(&s1, &s2).await;
 
     test_queryable_impl(
@@ -313,8 +313,8 @@ async fn test_queryable_same_session() {
 
     // Declare session, scouting in a group of its own (LOCAL PATCH, BER-2469)
     let group = ScoutingGroup::new();
-    let s1 = ztimeout!(zenoh::open(group.config::<zenoh::Config>()))
-        .expect("Failed to open session s1");
+    let s1 =
+        ztimeout!(zenoh::open(group.config::<zenoh::Config>())).expect("Failed to open session s1");
 
     test_queryable_impl(&s1, &s1, "same session", "test/queryable/same_session").await;
 
@@ -333,10 +333,10 @@ async fn test_accept_replies() {
     // LOCAL PATCH: the two sessions find each other by scouting, in a group of their own
     // (BER-2469).
     let group = ScoutingGroup::new();
-    let s1 = ztimeout!(zenoh::open(group.config::<zenoh::Config>()))
-        .expect("Failed to open session s1");
-    let s2 = ztimeout!(zenoh::open(group.config::<zenoh::Config>()))
-        .expect("Failed to open session s2");
+    let s1 =
+        ztimeout!(zenoh::open(group.config::<zenoh::Config>())).expect("Failed to open session s1");
+    let s2 =
+        ztimeout!(zenoh::open(group.config::<zenoh::Config>())).expect("Failed to open session s2");
     wait_for_peers(&s1, &s2).await;
     tokio::time::sleep(SLEEP).await;
     // -----------------------------------------------------------------------

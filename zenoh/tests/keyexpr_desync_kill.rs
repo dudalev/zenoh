@@ -37,8 +37,7 @@ mod keyexpr_desync_support;
 use std::{process::Stdio, sync::Arc, time::Duration};
 
 use keyexpr_desync_support::{
-    checking_subscribers, listener_locator, probe_delivery, spawn_pump, Observed,
-    VICTIM_READY_KEY,
+    checking_subscribers, listener_locator, probe_delivery, spawn_pump, Observed, VICTIM_READY_KEY,
 };
 use zenoh_core::ztimeout;
 use zenoh_test::TestSessions;
@@ -174,7 +173,13 @@ async fn test_killed_subscriber_process_does_not_misroute() {
     // perturbation ran; this establishes that it still flows AFTERWARDS, exactly. The
     // production defect's lasting symptom was a silent discard of every later publication,
     // which a misroute count and a delivered count both read as healthy.
-    probe_delivery(&publisher, &observed, 50, &format!("kill arm, {cycles} cycle(s)")).await;
+    probe_delivery(
+        &publisher,
+        &observed,
+        50,
+        &format!("kill arm, {cycles} cycle(s)"),
+    )
+    .await;
     ctx.close().await;
 }
 

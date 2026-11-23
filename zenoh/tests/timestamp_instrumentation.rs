@@ -1423,10 +1423,9 @@ async fn custom_callback_pub_sub() {
 
     // LOCAL PATCH: scouting in a group of its own (BER-2469).
     let group = ScoutingGroup::new();
-    let session = ztimeout!(
-        zenoh::open(group.config::<zenoh::Config>()).with_timestamp_callback(cb)
-    )
-    .unwrap();
+    let session =
+        ztimeout!(zenoh::open(group.config::<zenoh::Config>()).with_timestamp_callback(cb))
+            .unwrap();
     let publisher = ztimeout!(session.declare_publisher(ke)).unwrap();
     let subscriber = ztimeout!(session.declare_subscriber(ke)).unwrap();
 
@@ -1558,10 +1557,9 @@ async fn custom_callback_context() {
 
     // LOCAL PATCH: scouting in a group of its own (BER-2469).
     let group = ScoutingGroup::new();
-    let session = ztimeout!(
-        zenoh::open(group.config::<zenoh::Config>()).with_timestamp_callback(cb)
-    )
-    .unwrap();
+    let session =
+        ztimeout!(zenoh::open(group.config::<zenoh::Config>()).with_timestamp_callback(cb))
+            .unwrap();
     let expected_zid = session.zid();
 
     let publisher = ztimeout!(session.declare_publisher(ke)).unwrap();

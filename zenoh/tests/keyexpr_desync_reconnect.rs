@@ -37,8 +37,8 @@ mod keyexpr_desync_support;
 use std::{sync::Arc, time::Duration};
 
 use keyexpr_desync_support::{
-    checking_subscribers, open_client, open_router_with_two_clients, probe_delivery,
-    spawn_pump, Observed,
+    checking_subscribers, open_client, open_router_with_two_clients, probe_delivery, spawn_pump,
+    Observed,
 };
 use zenoh_core::ztimeout;
 use zenoh_test::TestSessions;
@@ -86,13 +86,22 @@ async fn test_subscriber_reconnect_does_not_misroute() {
     pump.abort();
     assert!(cycles > 0, "the arm ran no cycles, so it perturbed nothing");
     observed.assert_traffic_flowed(&format!("reconnect arm, {cycles} cycle(s)"));
-    observed.assert_delivered_since(delivered_before, &format!("reconnect arm, {cycles} cycle(s)"));
+    observed.assert_delivered_since(
+        delivered_before,
+        &format!("reconnect arm, {cycles} cycle(s)"),
+    );
     observed.assert_no_misroute(&format!("reconnect arm, {cycles} cycle(s)"));
 
     // THE PROBE PHASE. Everything above establishes that traffic flowed while the
     // perturbation ran; this establishes that it still flows AFTERWARDS, exactly. The
     // production defect's lasting symptom was a silent discard of every later publication,
     // which a misroute count and a delivered count both read as healthy.
-    probe_delivery(&publisher, &observed, 50, &format!("reconnect arm, {cycles} cycle(s)")).await;
+    probe_delivery(
+        &publisher,
+        &observed,
+        50,
+        &format!("reconnect arm, {cycles} cycle(s)"),
+    )
+    .await;
     ctx.close().await;
 }

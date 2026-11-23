@@ -39,11 +39,6 @@
 //! sessions and routers it starts and no zenoh the host runs. A test whose subject needs a
 //! router runs the zenohd built from this workspace, through [`Zenohd`].
 
-use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket},
-    ops::DerefMut,
-    time::Duration,
-};
 #[cfg(feature = "sessions")]
 use std::{
     io::{BufRead, BufReader, Read},
@@ -55,6 +50,11 @@ use std::{
     thread::JoinHandle,
     time::Instant,
 };
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket},
+    ops::DerefMut,
+    time::Duration,
+};
 
 #[cfg(feature = "internal")]
 use zenoh::internal::runtime::{Runtime, RuntimeBuilder};
@@ -65,9 +65,9 @@ use zenoh_config::{WhatAmI, ZenohId};
 #[cfg(feature = "sessions")]
 use zenoh_core::ztimeout;
 use zenoh_link::EndPoint;
-use zenoh_protocol::core::Parameters;
 #[cfg(feature = "sessions")]
 use zenoh_protocol::core::EndPoints;
+use zenoh_protocol::core::Parameters;
 
 /// Default timeout applied to async operations via [`ztimeout!`].
 pub const TIMEOUT: Duration = Duration::from_secs(60);
@@ -248,8 +248,14 @@ impl Zenohd {
             .unwrap_or_else(|e| panic!("cannot start {binary}: {e}"));
         let log = Arc::new(Mutex::new(String::new()));
         let readers = [
-            child.stdout.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
-            child.stderr.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
+            child
+                .stdout
+                .take()
+                .map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
+            child
+                .stderr
+                .take()
+                .map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
         ]
         .into_iter()
         .flatten()
@@ -285,7 +291,12 @@ impl Zenohd {
     /// not have found its router yet.
     pub fn wait_linked(&self, session: &Session) {
         let deadline = Instant::now() + TIMEOUT;
-        while !session.info().routers_zid().wait().any(|zid| zid == self.zid) {
+        while !session
+            .info()
+            .routers_zid()
+            .wait()
+            .any(|zid| zid == self.zid)
+        {
             let exited = self
                 .child
                 .lock()

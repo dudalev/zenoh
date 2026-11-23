@@ -149,8 +149,7 @@ fn child() -> ! {
     runtime().block_on(async {
         let admitted = Arc::new(AtomicUsize::new(0));
         let listener = manager(0xc1, admitted.clone());
-        let locator =
-            ztimeout!(listener.add_listener("tcp/127.0.0.1:0".parse().unwrap())).unwrap();
+        let locator = ztimeout!(listener.add_listener("tcp/127.0.0.1:0".parse().unwrap())).unwrap();
         println!("{LISTENING} {locator}");
         ztimeout!(async {
             while admitted.load(Ordering::SeqCst) == 0 {

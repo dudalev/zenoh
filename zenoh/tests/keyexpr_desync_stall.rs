@@ -91,6 +91,12 @@ async fn test_stalled_subscriber_does_not_misroute() {
     // perturbation ran; this establishes that it still flows AFTERWARDS, exactly. The
     // production defect's lasting symptom was a silent discard of every later publication,
     // which a misroute count and a delivered count both read as healthy.
-    probe_delivery(&publisher, &observed, 50, &format!("stall arm, {cycles} cycle(s)")).await;
+    probe_delivery(
+        &publisher,
+        &observed,
+        50,
+        &format!("stall arm, {cycles} cycle(s)"),
+    )
+    .await;
     ctx.close().await;
 }

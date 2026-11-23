@@ -236,12 +236,7 @@ pub fn spawn_pump(session: Arc<Session>) -> tokio::task::JoinHandle<()> {
 /// Probes are published with `CongestionControl::Block`, unlike the pump: the pump is
 /// aborted before this runs, so the link is idle, and Block means a missing probe is a real
 /// loss rather than congestion control doing its job.
-pub async fn probe_delivery(
-    session: &Session,
-    observed: &Arc<Observed>,
-    n: u64,
-    context: &str,
-) {
+pub async fn probe_delivery(session: &Session, observed: &Arc<Observed>, n: u64, context: &str) {
     let before = observed.probes();
     for _ in 0..n {
         session
@@ -277,9 +272,7 @@ pub async fn probe_delivery(
 /// `listen/endpoints` is inherited from `get_listener_config`, i.e. set EXPLICITLY to
 /// `tcp/127.0.0.1:0`. That is not incidental: a router that is left to default listens on
 /// `tcp/[::]:7447`, the production router port, on every interface.
-pub async fn open_router_with_two_clients(
-    ctx: &mut TestSessions,
-) -> (Session, Session, Session) {
+pub async fn open_router_with_two_clients(ctx: &mut TestSessions) -> (Session, Session, Session) {
     let mut config = ctx.get_listener_config("tcp/127.0.0.1:0", 1);
     config
         .insert_json5("mode", "\"router\"")
@@ -298,7 +291,9 @@ pub async fn open_router_with_two_clients(
 /// a lease, and silently measures nothing. Shortening it is what makes that arm real.
 pub async fn open_client_with_lease(ctx: &mut TestSessions, lease_ms: u64) -> Session {
     let mut config = ctx.get_connector_config();
-    config.insert_json5("mode", "\"client\"").expect("set client mode");
+    config
+        .insert_json5("mode", "\"client\"")
+        .expect("set client mode");
     config
         .insert_json5("transport/link/tx/lease", &lease_ms.to_string())
         .expect("set lease");

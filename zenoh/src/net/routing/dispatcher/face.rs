@@ -289,8 +289,7 @@ impl FaceState {
             let id = self.next_local_id;
             // Wrap to 1, never to 0: EMPTY_EXPR_ID must never be handed out.
             self.next_local_id = if id == ExprId::MAX { 1 } else { id + 1 };
-            if !self.local_mappings.contains_key(&id) && !self.remote_mappings.contains_key(&id)
-            {
+            if !self.local_mappings.contains_key(&id) && !self.remote_mappings.contains_key(&id) {
                 return Some(id);
             }
         }

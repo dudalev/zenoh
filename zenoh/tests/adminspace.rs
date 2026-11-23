@@ -129,8 +129,7 @@ async fn test_adminspace_read() {
         // impossible whenever anything else held 8080, including a second copy of this very
         // suite: the plugin then failed with "Address already in use (os error 98)" and the
         // loader panicked, because the plugin is marked required. Port 0 lets the OS pick.
-        c.insert_json5("plugins/rest/http_port", "\"0\"")
-            .unwrap();
+        c.insert_json5("plugins/rest/http_port", "\"0\"").unwrap();
         c.insert_json5("plugins/rest/__required__", "true").unwrap();
         let s = ztimeout!(zenoh::open(c)).unwrap();
         s
