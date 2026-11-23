@@ -39,6 +39,7 @@ impl TransportUnicastLowlatency {
         // A closing manager, or a process that has begun to exit, delivers nothing and maps
         // nothing (BER-2230, BER-2456).
         if self.manager.is_closed() {
+            self.manager.count_undelivered();
             return Ok(());
         }
         let callback = zread!(self.callback).clone();
@@ -52,6 +53,7 @@ impl TransportUnicastLowlatency {
             if let Some(shm_context) = &self.shm_context {
                 // Exit waits for this map, and refuses it once begun (BER-2456).
                 let Some(_exit) = crate::common::exit::hold() else {
+                    self.manager.count_undelivered();
                     return Ok(());
                 };
                 if let Err(e) = crate::common::shm::interop::map_zmsg_to_shmbuf(

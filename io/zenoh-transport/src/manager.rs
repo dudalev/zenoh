@@ -15,7 +15,7 @@ use std::{
     collections::HashMap,
     fmt,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::Duration,
@@ -193,6 +193,9 @@ pub struct TransportManagerState {
     pub multicast: TransportManagerStateMulticast,
     /// Set when [`TransportManager::close`] begins, and never cleared.
     closed: AtomicBool,
+    /// The messages the receive paths dropped because close or exit had begun, counted on
+    /// the drop path only.
+    undelivered: AtomicU64,
     #[cfg(feature = "shared-memory")]
     pub shm_context: Option<ShmContext>,
     #[cfg(all(
@@ -555,6 +558,7 @@ impl TransportManagerBuilder {
             unicast: unicast.state,
             multicast: multicast.state,
             closed: AtomicBool::new(false),
+            undelivered: AtomicU64::new(0),
             #[cfg(feature = "shared-memory")]
             shm_context,
             #[cfg(all(
@@ -742,6 +746,12 @@ impl TransportManager {
         self.close_unicast().await;
         self.close_multicast().await;
         self.task_controller.terminate_all_async().await;
+        // At DEBUG: a message that arrives while its receiver closes is lost whatever happens.
+        tracing::debug!(
+            "{} Closed: {} message(s) arrived after close began and were not delivered",
+            self.config.zid,
+            self.undelivered_after_close()
+        );
     }
 
     /// Whether [`TransportManager::close`] has begun, or the process has begun to exit.
@@ -764,6 +774,18 @@ impl TransportManager {
     #[cfg(feature = "test")]
     pub fn mark_closed_for_test(&self) {
         self.state.closed.store(true, Ordering::Release);
+    }
+
+    /// How many messages the receive paths have dropped, undelivered, because
+    /// [`TransportManager::close`] or process exit had begun.
+    pub fn undelivered_after_close(&self) -> u64 {
+        self.state.undelivered.load(Ordering::Relaxed)
+    }
+
+    /// Counts one message a receive path dropped because close or exit had begun: one relaxed
+    /// increment, on the drop path only.
+    pub(crate) fn count_undelivered(&self) {
+        self.state.undelivered.fetch_add(1, Ordering::Relaxed);
     }
 
     /*************************************/

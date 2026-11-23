@@ -27,6 +27,8 @@
 //! attach, and a receiver attaches a segment the first time it maps a buffer from it.
 //! The probes sent after `close` has begun come from a pool the receiver has never
 //! mapped, so any attempt to map one of them shows up as an attach.
+//!
+//! What a closing manager does not deliver it counts, and the open manager counts nothing.
 #![cfg(all(feature = "shared-memory", feature = "test", feature = "transport_tcp"))]
 
 use std::{
@@ -461,6 +463,11 @@ async fn not_yet_closed(lowlatency: bool, first_zid: u8) {
 
     received.hold.release();
     ztimeout!(closing).unwrap();
+    assert_eq!(
+        receiver.undelivered_after_close(),
+        2,
+        "a closing manager must count the two probes it did not deliver"
+    );
     for sender in &senders {
         ztimeout!(sender.close());
     }
@@ -505,6 +512,11 @@ async fn open_manager_reports(lowlatency: bool, first_zid: u8) {
         (total, reported),
         (1, 1),
         "an open manager's failed map must be reported at ERROR"
+    );
+    assert_eq!(
+        receiver.undelivered_after_close(),
+        0,
+        "an open manager drops nothing as closed"
     );
 
     ztimeout!(to_receiver.close()).unwrap();

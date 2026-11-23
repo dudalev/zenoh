@@ -507,6 +507,11 @@ async fn closing_on_multicast(first_zid: u8) {
 
     hold.release();
     ztimeout!(closing).unwrap();
+    assert_eq!(
+        receiver.undelivered_after_close(),
+        2,
+        "a closing manager must count the two probes it did not deliver"
+    );
     for manager in [&sender, &witness, &helper] {
         ztimeout!(manager.close());
     }
@@ -556,6 +561,11 @@ async fn open_manager_reports_on_multicast(first_zid: u8) {
         (total, reported),
         (1, 1),
         "an open manager's failed map must be reported at ERROR"
+    );
+    assert_eq!(
+        receiver.undelivered_after_close(),
+        0,
+        "an open manager drops nothing as closed"
     );
 
     for manager in [&sender, &receiver] {
