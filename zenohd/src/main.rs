@@ -294,7 +294,8 @@ fn test_default_features() {
         concat!(
             " zenoh/auth_pubkey",
             " zenoh/auth_usrpwd",
-            // " zenoh/shared-memory",
+            // A default of zenohd in this fork: see `[features]` in zenohd/Cargo.toml.
+            " zenoh/shared-memory",
             // " zenoh/stats",
             " zenoh/transport_multilink",
             " zenoh/transport_quic",
