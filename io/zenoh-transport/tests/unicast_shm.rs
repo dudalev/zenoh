@@ -629,7 +629,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn transport_unixpipe_shm() {
         zenoh_util::init_log_from_env_or("error");
-        let endpoint: EndPoint = "unixpipe/transport_unixpipe_shm".parse().unwrap();
+        let dir = zenoh_test::TestDir::new();
+        let endpoint: EndPoint = dir.endpoint("unixpipe", "transport_unixpipe_shm");
         run(&endpoint, false).await;
     }
 
@@ -637,9 +638,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn transport_unixpipe_shm_with_lowlatency_transport() {
         zenoh_util::init_log_from_env_or("error");
-        let endpoint: EndPoint = "unixpipe/transport_unixpipe_shm_with_lowlatency_transport"
-            .parse()
-            .unwrap();
+        let dir = zenoh_test::TestDir::new();
+        let endpoint: EndPoint = dir.endpoint(
+            "unixpipe",
+            "transport_unixpipe_shm_with_lowlatency_transport",
+        );
         run(&endpoint, true).await;
     }
 }

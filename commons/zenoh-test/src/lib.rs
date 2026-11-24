@@ -38,21 +38,25 @@
 //! A test that scouts does so in a [`ScoutingGroup`] of its own, so that it finds the
 //! sessions and routers it starts and no zenoh the host runs. A test whose subject needs a
 //! router runs the zenohd built from this workspace, through [`Zenohd`].
+//!
+//! # Files a test binds
+//!
+//! A unix socket or named pipe a test binds goes in a [`TestDir`] of its own, outside the
+//! source tree.
 
 #[cfg(feature = "sessions")]
 use std::{
     io::{BufRead, BufReader, Read},
     process::{Child, Command, Stdio},
-    sync::{
-        atomic::{AtomicU16, Ordering},
-        Arc, Mutex,
-    },
+    sync::{atomic::AtomicU16, Arc, Mutex},
     thread::JoinHandle,
     time::Instant,
 };
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket},
     ops::DerefMut,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
 };
 
@@ -94,6 +98,94 @@ pub fn get_free_tcp_port() -> u16 {
 pub fn get_free_udp_port() -> u16 {
     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
     socket.local_addr().unwrap().port()
+}
+
+/// A directory of a test's own for the files it binds, unix sockets and named pipes, in the
+/// system's temporary directory and so outside the source tree. It is removed when dropped,
+/// and so also when the test fails or panics (BER-2480).
+///
+/// An endpoint at a relative path binds in the test's working directory, which is its
+/// package's directory.
+pub struct TestDir(PathBuf);
+
+impl TestDir {
+    pub fn new() -> Self {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        loop {
+            let dir = std::env::temp_dir().join(format!(
+                "zenoh-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            match std::fs::create_dir(&dir) {
+                Ok(()) => return Self(dir),
+                // Left by an earlier process that had this one's id.
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("could not create the test directory {}: {e}", dir.display()),
+            }
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+
+    /// An endpoint of `protocol` whose address is the file `name` in this directory, as in
+    /// `dir.endpoint("unixsock-stream", "a.sock")`.
+    pub fn endpoint(&self, protocol: &str, name: &str) -> EndPoint {
+        let path = self.0.join(name);
+        let path = path
+            .to_str()
+            .expect("the temporary directory's path is UTF-8");
+        format!("{protocol}/{path}").parse().unwrap()
+    }
+}
+
+impl Default for TestDir {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_dir_all(&self.0) {
+            eprintln!(
+                "could not remove the test directory {}: {e}",
+                self.0.display()
+            );
+        }
+    }
+}
+
+/// The unix sockets and named pipes under `dir`, not following symlinks and skipping `.git`
+/// and every `target` directory.
+///
+/// Every test binds its own in a [`TestDir`], so one found under a package's directory was
+/// bound there by a test, in the source tree (BER-2480).
+#[cfg(unix)]
+pub fn sockets_under(dir: &Path) -> Vec<PathBuf> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let entries = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("could not read {}: {e}", dir.display()));
+        for entry in entries {
+            let entry = entry.unwrap();
+            let file_type = entry.file_type().unwrap();
+            if file_type.is_dir() {
+                if entry.file_name() != ".git" && entry.file_name() != "target" {
+                    pending.push(entry.path());
+                }
+            } else if file_type.is_socket() || file_type.is_fifo() {
+                found.push(entry.path());
+            }
+        }
+    }
+    found.sort();
+    found
 }
 
 /// The interface the tests' multicast uses, by name or by address: loopback, unless

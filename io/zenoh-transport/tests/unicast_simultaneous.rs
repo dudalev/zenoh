@@ -316,17 +316,18 @@ mod tests {
     #[ignore]
     async fn transport_unixpipe_simultaneous() {
         zenoh_util::init_log_from_env_or("error");
+        let dir = zenoh_test::TestDir::new();
         let endpoint01: Vec<EndPoint> = vec![
-            "unixpipe/transport_unixpipe_simultaneous".parse().unwrap(),
-            "unixpipe/transport_unixpipe_simultaneous2".parse().unwrap(),
-            "unixpipe/transport_unixpipe_simultaneous3".parse().unwrap(),
-            "unixpipe/transport_unixpipe_simultaneous4".parse().unwrap(),
+            dir.endpoint("unixpipe", "transport_unixpipe_simultaneous"),
+            dir.endpoint("unixpipe", "transport_unixpipe_simultaneous2"),
+            dir.endpoint("unixpipe", "transport_unixpipe_simultaneous3"),
+            dir.endpoint("unixpipe", "transport_unixpipe_simultaneous4"),
         ];
         let endpoint02: Vec<EndPoint> = vec![
-            "unixpipe/transport_unixpipe_simultaneous5".parse().unwrap(),
-            "unixpipe/transport_unixpipe_simultaneous6".parse().unwrap(),
-            "unixpipe/transport_unixpipe_simultaneous7".parse().unwrap(),
-            "unixpipe/transport_unixpipe_simultaneous8".parse().unwrap(),
+            dir.endpoint("unixpipe", "transport_unixpipe_simultaneous5"),
+            dir.endpoint("unixpipe", "transport_unixpipe_simultaneous6"),
+            dir.endpoint("unixpipe", "transport_unixpipe_simultaneous7"),
+            dir.endpoint("unixpipe", "transport_unixpipe_simultaneous8"),
         ];
 
         transport_simultaneous(endpoint01, endpoint02).await;

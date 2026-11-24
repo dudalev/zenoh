@@ -86,6 +86,9 @@ yet at the commit that introduced the table.
 * **No test reaches a zenoh the host runs** (BER-2469). A test that scouts does so in a
   scouting group of its own, with scouting on, and a test whose subject needs a router runs
   the zenohd built from this fork. See "Tests and the zenoh on the host" below.
+* **No test binds a socket in the source tree** (BER-2480). Upstream's unix-socket and
+  unixpipe tests bound theirs at paths relative to the package, so one that ended early left
+  its socket in the tree. See "Tests and the files they bind" below.
 * **`rust-toolchain.toml`: 1.100** (upstream pins 1.97.1). The fork's own MSRV declaration is
   unchanged at `rust-version = "1.75.0"`, which is upstream's claim and what the non-member
   `ci/zenoh-1-75` crate exists to test; nothing builds this fork on anything but the pinned
@@ -251,6 +254,19 @@ its test's result would depend on the host. So:
   misreads the blocks upstream leaves unclosed.
 * `zenohd/tests/scouting_group.rs` checks the property itself: a session finds the zenohd in
   its own group, and a session in another group finds nothing.
+
+**Tests and the files they bind** (BER-2480). An endpoint whose address is a path,
+`unixsock-stream` or `unixpipe`, binds where the path says, and a relative path binds in the
+test's working directory, which is its package's directory. So a test takes such an endpoint
+from a `zenoh_test::TestDir`, as `dir.endpoint("unixsock-stream", "a.sock")`: a directory of
+its own in the system's temporary directory, removed when it drops, also when the test fails
+or panics; `commons/zenoh-test/tests/test_dir.rs` tests that. Two checks keep it so:
+
+* `io/zenoh-transport/tests/endpoints.rs` asserts that its package's directory holds no
+  socket or named pipe while its own are bound;
+* `commons/zenoh-test/tests/unix_endpoints.rs` scans every `.rs` file under a `tests`
+  directory for such an endpoint a test writes itself. A scan, because most of these tests
+  are ignored or need a feature that is off, and a test that does not run checks nothing.
 
 Run everything, including the gated targets, with:
 

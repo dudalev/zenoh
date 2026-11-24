@@ -224,7 +224,8 @@ async fn time_udp_only_with_lowlatency_open() {
 #[ignore]
 async fn time_unixpipe_only_open() {
     zenoh::init_log_from_env_or("error");
-    let endpoint: EndPoint = "unixpipe/time_unixpipe_only_open".parse().unwrap();
+    let dir = zenoh_test::TestDir::new();
+    let endpoint: EndPoint = dir.endpoint("unixpipe", "time_unixpipe_only_open");
     time_universal_open(&endpoint, WhatAmI::Client).await;
 }
 
@@ -233,9 +234,8 @@ async fn time_unixpipe_only_open() {
 #[ignore]
 async fn time_unixpipe_only_with_lowlatency_open() {
     zenoh::init_log_from_env_or("error");
-    let endpoint: EndPoint = "unixpipe/time_unixpipe_only_with_lowlatency_open"
-        .parse()
-        .unwrap();
+    let dir = zenoh_test::TestDir::new();
+    let endpoint: EndPoint = dir.endpoint("unixpipe", "time_unixpipe_only_with_lowlatency_open");
     time_lowlatency_open(&endpoint, WhatAmI::Client).await;
 }
 
@@ -244,12 +244,9 @@ async fn time_unixpipe_only_with_lowlatency_open() {
 #[ignore]
 async fn time_unix_only_open() {
     zenoh::init_log_from_env_or("error");
-    let f1 = "zenoh-test-unix-socket-9-open.sock";
-    let _ = std::fs::remove_file(f1);
-    let endpoint: EndPoint = format!("unixsock-stream/{f1}").parse().unwrap();
+    let dir = zenoh_test::TestDir::new();
+    let endpoint: EndPoint = dir.endpoint("unixsock-stream", "zenoh-test-unix-socket-9-open.sock");
     time_universal_open(&endpoint, WhatAmI::Client).await;
-    let _ = std::fs::remove_file(f1);
-    let _ = std::fs::remove_file(format!("{f1}.lock"));
 }
 
 #[cfg(feature = "transport_tls")]

@@ -373,26 +373,27 @@ async fn transport_ws_concurrent() {
 #[ignore]
 async fn transport_unixpipe_concurrent() {
     zenoh_util::init_log_from_env_or("error");
+    let dir = zenoh_test::TestDir::new();
 
     let endpoint01: Vec<EndPoint> = vec![
-        "unixpipe/transport_unixpipe_concurrent".parse().unwrap(),
-        "unixpipe/transport_unixpipe_concurrent2".parse().unwrap(),
-        "unixpipe/transport_unixpipe_concurrent3".parse().unwrap(),
-        "unixpipe/transport_unixpipe_concurrent4".parse().unwrap(),
-        "unixpipe/transport_unixpipe_concurrent5".parse().unwrap(),
-        "unixpipe/transport_unixpipe_concurrent6".parse().unwrap(),
-        "unixpipe/transport_unixpipe_concurrent7".parse().unwrap(),
-        "unixpipe/transport_unixpipe_concurrent8".parse().unwrap(),
+        dir.endpoint("unixpipe", "transport_unixpipe_concurrent"),
+        dir.endpoint("unixpipe", "transport_unixpipe_concurrent2"),
+        dir.endpoint("unixpipe", "transport_unixpipe_concurrent3"),
+        dir.endpoint("unixpipe", "transport_unixpipe_concurrent4"),
+        dir.endpoint("unixpipe", "transport_unixpipe_concurrent5"),
+        dir.endpoint("unixpipe", "transport_unixpipe_concurrent6"),
+        dir.endpoint("unixpipe", "transport_unixpipe_concurrent7"),
+        dir.endpoint("unixpipe", "transport_unixpipe_concurrent8"),
     ];
     let endpoint02: Vec<EndPoint> = vec![
-        "unixpipe/transport_unixpipe_concurrent9".parse().unwrap(),
-        "unixpipe/transport_unixpipe_concurrent10".parse().unwrap(),
-        "unixpipe/transport_unixpipe_concurrent11".parse().unwrap(),
-        "unixpipe/transport_unixpipe_concurrent12".parse().unwrap(),
-        "unixpipe/transport_unixpipe_concurrent13".parse().unwrap(),
-        "unixpipe/transport_unixpipe_concurrent14".parse().unwrap(),
-        "unixpipe/transport_unixpipe_concurrent15".parse().unwrap(),
-        "unixpipe/transport_unixpipe_concurrent16".parse().unwrap(),
+        dir.endpoint("unixpipe", "transport_unixpipe_concurrent9"),
+        dir.endpoint("unixpipe", "transport_unixpipe_concurrent10"),
+        dir.endpoint("unixpipe", "transport_unixpipe_concurrent11"),
+        dir.endpoint("unixpipe", "transport_unixpipe_concurrent12"),
+        dir.endpoint("unixpipe", "transport_unixpipe_concurrent13"),
+        dir.endpoint("unixpipe", "transport_unixpipe_concurrent14"),
+        dir.endpoint("unixpipe", "transport_unixpipe_concurrent15"),
+        dir.endpoint("unixpipe", "transport_unixpipe_concurrent16"),
     ];
 
     transport_concurrent(endpoint01, endpoint02).await;

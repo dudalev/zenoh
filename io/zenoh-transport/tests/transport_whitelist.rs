@@ -159,11 +159,12 @@ async fn transport_whitelist_tcp() {
 #[ignore]
 async fn transport_whitelist_unixpipe() {
     zenoh_util::init_log_from_env_or("error");
+    let dir = zenoh_test::TestDir::new();
 
     // Define the locators
     let endpoints: Vec<EndPoint> = vec![
-        "unixpipe/transport_whitelist_unixpipe".parse().unwrap(),
-        "unixpipe/transport_whitelist_unixpipe2".parse().unwrap(),
+        dir.endpoint("unixpipe", "transport_whitelist_unixpipe"),
+        dir.endpoint("unixpipe", "transport_whitelist_unixpipe2"),
     ];
     // Run
     run(&endpoints).await;

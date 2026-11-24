@@ -642,7 +642,8 @@ async fn authenticator_udp_with_lowlatency_transport() {
 #[ignore]
 async fn authenticator_unixpipe() {
     zenoh_util::init_log_from_env_or("error");
-    let endpoint: EndPoint = "unixpipe/authenticator_unixpipe_test".parse().unwrap();
+    let dir = zenoh_test::TestDir::new();
+    let endpoint: EndPoint = dir.endpoint("unixpipe", "authenticator_unixpipe_test");
     run_with_universal_transport(&endpoint).await;
 }
 
@@ -651,9 +652,11 @@ async fn authenticator_unixpipe() {
 #[ignore]
 async fn authenticator_unixpipe_with_lowlatency_transport() {
     zenoh_util::init_log_from_env_or("error");
-    let endpoint: EndPoint = "unixpipe/authenticator_unixpipe_with_lowlatency_transport"
-        .parse()
-        .unwrap();
+    let dir = zenoh_test::TestDir::new();
+    let endpoint: EndPoint = dir.endpoint(
+        "unixpipe",
+        "authenticator_unixpipe_with_lowlatency_transport",
+    );
     run_with_lowlatency_transport(&endpoint).await;
 }
 
@@ -683,12 +686,9 @@ async fn authenticator_ws_with_lowlatency_transport() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn authenticator_unix() {
     zenoh_util::init_log_from_env_or("error");
-    let f1 = "zenoh-test-unix-socket-10.sock";
-    let _ = std::fs::remove_file(f1);
-    let endpoint: EndPoint = format!("unixsock-stream/{f1}").parse().unwrap();
+    let dir = zenoh_test::TestDir::new();
+    let endpoint: EndPoint = dir.endpoint("unixsock-stream", "zenoh-test-unix-socket-10.sock");
     run_with_universal_transport(&endpoint).await;
-    let _ = std::fs::remove_file(f1);
-    let _ = std::fs::remove_file(format!("{f1}.lock"));
 }
 
 #[cfg(feature = "transport_tls")]

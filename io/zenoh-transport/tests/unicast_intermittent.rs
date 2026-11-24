@@ -455,7 +455,8 @@ async fn transport_ws_intermittent_for_lowlatency_transport() {
 #[ignore]
 async fn transport_unixpipe_intermittent() {
     zenoh_util::init_log_from_env_or("error");
-    let endpoint: EndPoint = "unixpipe/transport_unixpipe_intermittent".parse().unwrap();
+    let dir = zenoh_test::TestDir::new();
+    let endpoint: EndPoint = dir.endpoint("unixpipe", "transport_unixpipe_intermittent");
     universal_transport_intermittent(&endpoint).await;
 }
 
@@ -464,9 +465,11 @@ async fn transport_unixpipe_intermittent() {
 #[ignore]
 async fn transport_unixpipe_intermittent_for_lowlatency_transport() {
     zenoh_util::init_log_from_env_or("error");
-    let endpoint: EndPoint = "unixpipe/transport_unixpipe_intermittent_for_lowlatency_transport"
-        .parse()
-        .unwrap();
+    let dir = zenoh_test::TestDir::new();
+    let endpoint: EndPoint = dir.endpoint(
+        "unixpipe",
+        "transport_unixpipe_intermittent_for_lowlatency_transport",
+    );
     lowlatency_transport_intermittent(&endpoint).await;
 }
 

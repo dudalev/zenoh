@@ -92,6 +92,19 @@ async fn run(endpoints: &[EndPoint]) {
             ztimeout!(sm.add_listener(e.clone())).unwrap();
         }
 
+        // Bound now: a socket or pipe a test of this package binds at a relative path is in
+        // its directory, which is in the source tree (BER-2480).
+        #[cfg(unix)]
+        {
+            let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            let in_tree = zenoh_test::sockets_under(package);
+            assert!(
+                in_tree.is_empty(),
+                "a test bound a socket or pipe in the source tree, not in a \
+                 `zenoh_test::TestDir`: {in_tree:?}"
+            );
+        }
+
         tokio::time::sleep(SLEEP).await;
 
         // Delete the listeners
@@ -146,21 +159,13 @@ async fn endpoint_udp() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn endpoint_unix() {
     zenoh_util::init_log_from_env_or("error");
-    // Remove the files if they still exists
-    let f1 = "zenoh-test-unix-socket-0.sock";
-    let f2 = "zenoh-test-unix-socket-1.sock";
-    let _ = std::fs::remove_file(f1);
-    let _ = std::fs::remove_file(f2);
+    let dir = zenoh_test::TestDir::new();
     // Define the locators
     let endpoints: Vec<EndPoint> = vec![
-        format!("unixsock-stream/{f1}").parse().unwrap(),
-        format!("unixsock-stream/{f2}").parse().unwrap(),
+        dir.endpoint("unixsock-stream", "zenoh-test-unix-socket-0.sock"),
+        dir.endpoint("unixsock-stream", "zenoh-test-unix-socket-1.sock"),
     ];
     run(&endpoints).await;
-    let _ = std::fs::remove_file(f1);
-    let _ = std::fs::remove_file(f2);
-    let _ = std::fs::remove_file(format!("{f1}.lock"));
-    let _ = std::fs::remove_file(format!("{f2}.lock"));
 }
 
 #[cfg(feature = "transport_ws")]
@@ -184,12 +189,13 @@ async fn endpoint_ws() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn endpoint_unixpipe() {
     zenoh_util::init_log_from_env_or("error");
+    let dir = zenoh_test::TestDir::new();
     // Define the locators
     let endpoints: Vec<EndPoint> = vec![
-        "unixpipe/endpoint_unixpipe".parse().unwrap(),
-        "unixpipe/endpoint_unixpipe2".parse().unwrap(),
-        "unixpipe/endpoint_unixpipe3".parse().unwrap(),
-        "unixpipe/endpoint_unixpipe4".parse().unwrap(),
+        dir.endpoint("unixpipe", "endpoint_unixpipe"),
+        dir.endpoint("unixpipe", "endpoint_unixpipe2"),
+        dir.endpoint("unixpipe", "endpoint_unixpipe3"),
+        dir.endpoint("unixpipe", "endpoint_unixpipe4"),
     ];
     run(&endpoints).await;
 }
@@ -225,9 +231,7 @@ async fn endpoint_tcp_udp() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn endpoint_tcp_udp_unix() {
     zenoh_util::init_log_from_env_or("error");
-    // Remove the file if it still exists
-    let f1 = "zenoh-test-unix-socket-2.sock";
-    let _ = std::fs::remove_file(f1);
+    let dir = zenoh_test::TestDir::new();
     // Define the locators
     let endpoints: Vec<EndPoint> = vec![
         format!("tcp/127.0.0.1:{}", get_free_tcp_port())
@@ -242,11 +246,9 @@ async fn endpoint_tcp_udp_unix() {
         format!("udp/[::1]:{}", get_free_udp_port())
             .parse()
             .unwrap(),
-        format!("unixsock-stream/{f1}").parse().unwrap(),
+        dir.endpoint("unixsock-stream", "zenoh-test-unix-socket-2.sock"),
     ];
     run(&endpoints).await;
-    let _ = std::fs::remove_file(f1);
-    let _ = std::fs::remove_file(format!("{f1}.lock"));
 }
 
 #[cfg(all(
@@ -257,9 +259,7 @@ async fn endpoint_tcp_udp_unix() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn endpoint_tcp_unix() {
     zenoh_util::init_log_from_env_or("error");
-    // Remove the file if it still exists
-    let f1 = "zenoh-test-unix-socket-3.sock";
-    let _ = std::fs::remove_file(f1);
+    let dir = zenoh_test::TestDir::new();
     // Define the locators
     let endpoints: Vec<EndPoint> = vec![
         format!("tcp/127.0.0.1:{}", get_free_tcp_port())
@@ -268,11 +268,9 @@ async fn endpoint_tcp_unix() {
         format!("tcp/[::1]:{}", get_free_tcp_port())
             .parse()
             .unwrap(),
-        format!("unixsock-stream/{f1}").parse().unwrap(),
+        dir.endpoint("unixsock-stream", "zenoh-test-unix-socket-3.sock"),
     ];
     run(&endpoints).await;
-    let _ = std::fs::remove_file(f1);
-    let _ = std::fs::remove_file(format!("{f1}.lock"));
 }
 
 #[cfg(all(
@@ -283,9 +281,8 @@ async fn endpoint_tcp_unix() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn endpoint_udp_unix() {
     zenoh_util::init_log_from_env_or("error");
-    // Remove the file if it still exists
-    let f1 = "zenoh-test-unix-socket-4.sock";
-    let _ = std::fs::remove_file(f1); // Define the locators
+    let dir = zenoh_test::TestDir::new();
+    // Define the locators
     let endpoints: Vec<EndPoint> = vec![
         format!("udp/127.0.0.1:{}", get_free_udp_port())
             .parse()
@@ -293,11 +290,9 @@ async fn endpoint_udp_unix() {
         format!("udp/[::1]:{}", get_free_udp_port())
             .parse()
             .unwrap(),
-        format!("unixsock-stream/{f1}").parse().unwrap(),
+        dir.endpoint("unixsock-stream", "zenoh-test-unix-socket-4.sock"),
     ];
     run(&endpoints).await;
-    let _ = std::fs::remove_file(f1);
-    let _ = std::fs::remove_file(format!("{f1}.lock"));
 }
 
 #[cfg(feature = "transport_tls")]

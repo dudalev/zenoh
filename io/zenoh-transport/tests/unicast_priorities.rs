@@ -338,11 +338,9 @@ async fn priorities_tcp_only() {
 #[ignore]
 async fn conduits_unixpipe_only() {
     zenoh_util::init_log_from_env_or("error");
+    let dir = zenoh_test::TestDir::new();
     // Define the locators
-    let endpoints: Vec<EndPoint> = vec!["unixpipe/conduits_unixpipe_only"
-        .to_string()
-        .parse()
-        .unwrap()];
+    let endpoints: Vec<EndPoint> = vec![dir.endpoint("unixpipe", "conduits_unixpipe_only")];
     // Run
     run(&endpoints).await;
 }

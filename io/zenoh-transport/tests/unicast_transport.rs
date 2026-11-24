@@ -822,11 +822,11 @@ async fn transport_unicast_udp_only_with_lowlatency_transport() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn transport_unicast_unix_only() {
     zenoh_util::init_log_from_env_or("error");
+    let dir = zenoh_test::TestDir::new();
 
-    let f1 = "zenoh-test-unix-socket-5.sock";
-    let _ = std::fs::remove_file(f1);
     // Define the locator
-    let endpoints: Vec<EndPoint> = vec![format!("unixsock-stream/{f1}").parse().unwrap()];
+    let endpoints: Vec<EndPoint> =
+        vec![dir.endpoint("unixsock-stream", "zenoh-test-unix-socket-5.sock")];
     // Define the reliability and congestion control
     let channel = [
         Channel {
@@ -840,8 +840,6 @@ async fn transport_unicast_unix_only() {
     ];
     // Run
     run_with_universal_transport(&endpoints, &endpoints, &channel, &MSG_SIZE_ALL).await;
-    let _ = std::fs::remove_file(f1);
-    let _ = std::fs::remove_file(format!("{f1}.lock"));
 }
 
 #[cfg(all(feature = "transport_unixsock-stream", target_family = "unix"))]
@@ -849,11 +847,13 @@ async fn transport_unicast_unix_only() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn transport_unicast_unix_only_with_lowlatency_transport() {
     zenoh_util::init_log_from_env_or("error");
+    let dir = zenoh_test::TestDir::new();
 
-    let f1 = "zenoh-test-unix-socket-5-lowlatency.sock";
-    let _ = std::fs::remove_file(f1);
     // Define the locator
-    let endpoints: Vec<EndPoint> = vec![format!("unixsock-stream/{f1}").parse().unwrap()];
+    let endpoints: Vec<EndPoint> = vec![dir.endpoint(
+        "unixsock-stream",
+        "zenoh-test-unix-socket-5-lowlatency.sock",
+    )];
     // Define the reliability and congestion control
     let channel = [
         Channel {
@@ -867,8 +867,6 @@ async fn transport_unicast_unix_only_with_lowlatency_transport() {
     ];
     // Run
     run_with_lowlatency_transport(&endpoints, &endpoints, &channel, &MSG_SIZE_LOWLATENCY).await;
-    let _ = std::fs::remove_file(f1);
-    let _ = std::fs::remove_file(format!("{f1}.lock"));
 }
 
 #[cfg(feature = "transport_ws")]
@@ -945,11 +943,12 @@ async fn transport_unicast_ws_only_with_lowlatency_transport() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn transport_unicast_unixpipe_only() {
     zenoh_util::init_log_from_env_or("error");
+    let dir = zenoh_test::TestDir::new();
 
     // Define the locator
     let endpoints: Vec<EndPoint> = vec![
-        "unixpipe/transport_unicast_unixpipe_only".parse().unwrap(),
-        "unixpipe/transport_unicast_unixpipe_only2".parse().unwrap(),
+        dir.endpoint("unixpipe", "transport_unicast_unixpipe_only"),
+        dir.endpoint("unixpipe", "transport_unicast_unixpipe_only2"),
     ];
     // Define the reliability and congestion control
     let channel = [
@@ -971,13 +970,13 @@ async fn transport_unicast_unixpipe_only() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn transport_unicast_unixpipe_only_with_lowlatency_transport() {
     zenoh_util::init_log_from_env_or("error");
+    let dir = zenoh_test::TestDir::new();
 
     // Define the locator
-    let endpoints: Vec<EndPoint> = vec![
-        "unixpipe/transport_unicast_unixpipe_only_with_lowlatency_transport"
-            .parse()
-            .unwrap(),
-    ];
+    let endpoints: Vec<EndPoint> = vec![dir.endpoint(
+        "unixpipe",
+        "transport_unicast_unixpipe_only_with_lowlatency_transport",
+    )];
     // Define the reliability and congestion control
     let channel = [
         Channel {
@@ -1038,9 +1037,8 @@ async fn transport_unicast_tcp_udp() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn transport_unicast_tcp_unix() {
     zenoh_util::init_log_from_env_or("error");
+    let dir = zenoh_test::TestDir::new();
 
-    let f1 = "zenoh-test-unix-socket-6.sock";
-    let _ = std::fs::remove_file(f1);
     // Define the locator
     let endpoints: Vec<EndPoint> = vec![
         format!("tcp/127.0.0.1:{}", get_free_tcp_port())
@@ -1049,7 +1047,7 @@ async fn transport_unicast_tcp_unix() {
         format!("tcp/[::1]:{}", get_free_tcp_port())
             .parse()
             .unwrap(),
-        format!("unixsock-stream/{f1}").parse().unwrap(),
+        dir.endpoint("unixsock-stream", "zenoh-test-unix-socket-6.sock"),
     ];
     // Define the reliability and congestion control
     let channel = [
@@ -1064,8 +1062,6 @@ async fn transport_unicast_tcp_unix() {
     ];
     // Run
     run_with_universal_transport(&endpoints, &endpoints, &channel, &MSG_SIZE_ALL).await;
-    let _ = std::fs::remove_file(f1);
-    let _ = std::fs::remove_file(format!("{f1}.lock"));
 }
 
 #[cfg(all(
@@ -1077,9 +1073,8 @@ async fn transport_unicast_tcp_unix() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn transport_unicast_udp_unix() {
     zenoh_util::init_log_from_env_or("error");
+    let dir = zenoh_test::TestDir::new();
 
-    let f1 = "zenoh-test-unix-socket-7.sock";
-    let _ = std::fs::remove_file(f1);
     // Define the locator
     let endpoints: Vec<EndPoint> = vec![
         format!("udp/127.0.0.1:{}", get_free_udp_port())
@@ -1088,7 +1083,7 @@ async fn transport_unicast_udp_unix() {
         format!("udp/[::1]:{}", get_free_udp_port())
             .parse()
             .unwrap(),
-        format!("unixsock-stream/{f1}").parse().unwrap(),
+        dir.endpoint("unixsock-stream", "zenoh-test-unix-socket-7.sock"),
     ];
     // Define the reliability and congestion control
     let channel = [
@@ -1103,8 +1098,6 @@ async fn transport_unicast_udp_unix() {
     ];
     // Run
     run_with_universal_transport(&endpoints, &endpoints, &channel, &MSG_SIZE_NOFRAG).await;
-    let _ = std::fs::remove_file(f1);
-    let _ = std::fs::remove_file(format!("{f1}.lock"));
 }
 
 #[cfg(all(
@@ -1117,9 +1110,8 @@ async fn transport_unicast_udp_unix() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn transport_unicast_tcp_udp_unix() {
     zenoh_util::init_log_from_env_or("error");
+    let dir = zenoh_test::TestDir::new();
 
-    let f1 = "zenoh-test-unix-socket-8.sock";
-    let _ = std::fs::remove_file(f1);
     // Define the locator
     let endpoints: Vec<EndPoint> = vec![
         format!("tcp/127.0.0.1:{}", get_free_tcp_port())
@@ -1134,7 +1126,7 @@ async fn transport_unicast_tcp_udp_unix() {
         format!("udp/[::1]:{}", get_free_udp_port())
             .parse()
             .unwrap(),
-        format!("unixsock-stream/{f1}").parse().unwrap(),
+        dir.endpoint("unixsock-stream", "zenoh-test-unix-socket-8.sock"),
     ];
     // Define the reliability and congestion control
     let channel = [
@@ -1149,8 +1141,6 @@ async fn transport_unicast_tcp_udp_unix() {
     ];
     // Run
     run_with_universal_transport(&endpoints, &endpoints, &channel, &MSG_SIZE_NOFRAG).await;
-    let _ = std::fs::remove_file(f1);
-    let _ = std::fs::remove_file(format!("{f1}.lock"));
 }
 
 #[cfg(all(feature = "transport_tls", target_family = "unix"))]

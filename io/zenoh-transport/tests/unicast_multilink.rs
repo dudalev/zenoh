@@ -522,8 +522,9 @@ mod tests {
     #[ignore]
     async fn multilink_unixpipe_only() {
         zenoh_util::init_log_from_env_or("error");
+        let dir = zenoh_test::TestDir::new();
 
-        let endpoint: EndPoint = "unixpipe/multilink_unixpipe_only".parse().unwrap();
+        let endpoint: EndPoint = dir.endpoint("unixpipe", "multilink_unixpipe_only");
         multilink_transport(&endpoint).await;
     }
 
@@ -532,13 +533,10 @@ mod tests {
     #[ignore]
     async fn multilink_unix_only() {
         zenoh_util::init_log_from_env_or("error");
+        let dir = zenoh_test::TestDir::new();
 
-        let f1 = "zenoh-test-unix-socket-9.sock";
-        let _ = std::fs::remove_file(f1);
-        let endpoint: EndPoint = format!("unixsock-stream/{f1}").parse().unwrap();
+        let endpoint: EndPoint = dir.endpoint("unixsock-stream", "zenoh-test-unix-socket-9.sock");
         multilink_transport(&endpoint).await;
-        let _ = std::fs::remove_file(f1);
-        let _ = std::fs::remove_file(format!("{f1}.lock"));
     }
 
     #[cfg(feature = "transport_tls")]
