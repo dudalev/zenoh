@@ -54,12 +54,17 @@
 /// FINALIZED and nothing else -- so a caller can report "shutting down" rather
 /// than guessing.
 ///
-/// RESIDUAL, stated because it is not zero: between `try_read` reporting
-/// "uninitialized" and `read` initializing, finalization could begin, and the
-/// `read` would panic. That window is a few instructions wide and requires a
-/// static to be touched for the very first time during teardown. Closing it
-/// entirely needs `init_then_try_read_lock`, which the `dynamic` macro does not
-/// expose.
+/// RESIDUAL, stated because it is not zero: a static touched for the very first
+/// time once static_init has finalized the others is not initialized. static_init
+/// refuses to register a static after its exit sequence, so the `read` below
+/// panics, `AccessError { phase: INITIALIZATION_SKIPED | REGISTRATION_REFUSED }`,
+/// on every such first touch: no narrow window. zenoh-transport's
+/// `a_first_accept_in_flight_at_exit_is_refused_cleanly` measured it on that crate's
+/// own static (BER-2487). This crate cannot see exit begin, so a caller that can
+/// make such a first touch must refuse once exit has begun, as zenoh-transport's
+/// handoff reactor does. In `init` mode `init::init` initializes them all at session
+/// open, so there it cannot happen. Closing it here needs
+/// `init_then_try_read_lock`, which the `dynamic` macro does not expose.
 macro_rules! try_live_read {
     ($st:path) => {
         match $st.try_read() {

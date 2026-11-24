@@ -62,8 +62,10 @@ yet at the commit that introduced the table.
   exit begins, accept or open, is refused where it reaches the transport's own static, the
   shared-memory handoff reactor, whether exit has finalized it or it was never initialized:
   with no Close frame, and nothing logged above DEBUG. Not covered: a map that takes longer
-  than 1 s can still meet a finalized static. And zenohd builds with shared memory by
-  default.
+  than 1 s can still meet a finalized static; and in `lazy` mode, zenoh's default and not
+  the consumer's, the first use of one of zenoh-shm's statics after static_init has
+  finalized the others panics (`commons/zenoh-shm/src/statics.rs`). And zenohd builds with
+  shared memory by default.
 * **A query no longer waits on a peer that has closed.** A closing face takes itself out of
   every cached route and only then finalizes its pending queries. Upstream left a closed peer
   in the routes of a peer that had not yet had its answer to the initial interest, so the next
