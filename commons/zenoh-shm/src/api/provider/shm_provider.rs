@@ -863,7 +863,7 @@ where
         let (allocated_metadata, confirmed_metadata) = Self::alloc_resources()?;
 
         // wrap everything to ShmBufInner
-        let wrapped = self.wrap(chunk, len, allocated_metadata, confirmed_metadata);
+        let wrapped = self.wrap(chunk, len, allocated_metadata, confirmed_metadata)?;
         // SAFETY: `wrapped` is guaranteed to be valid as it represents a mapped chunk.
         Ok(unsafe { ZShmMut::new_unchecked(wrapped) })
     }
@@ -962,7 +962,7 @@ where
         let chunk = policy.alloc(layout, self)?;
 
         // wrap allocated chunk to ShmBufInner
-        let wrapped = self.wrap(chunk, size, allocated_metadata, confirmed_metadata);
+        let wrapped = self.wrap(chunk, size, allocated_metadata, confirmed_metadata)?;
         // SAFETY: `wrapped` is guaranteed to be valid as it represents an allocated chunk.
         Ok(unsafe { ZShmMut::new_unchecked(wrapped) })
     }
@@ -993,7 +993,7 @@ where
         len: NonZeroUsize,
         allocated_metadata: AllocatedMetadataDescriptor,
         confirmed_metadata: ConfirmedDescriptor,
-    ) -> ShmBufInner {
+    ) -> Result<ShmBufInner, ZAllocError> {
         // write additional metadata
         // chunk descriptor
         allocated_metadata
@@ -1006,9 +1006,19 @@ where
             .store(self.backend.id(), Ordering::Relaxed);
 
         // add watchdog to validator
-        GLOBAL_VALIDATOR
-            .read()
-            .add(confirmed_metadata.owned.clone());
+        //
+        // The shutdown hazard `alloc_resources` guards against, arriving here: exit finalizes
+        // the validator before the storage and the confirmator, so an allocation can pass
+        // `alloc_resources` and meet the validator finalized (BER-2486). No buffer will own
+        // the chunk then, so it goes back to the backend; the metadata is released as its
+        // descriptors drop.
+        match try_live_read!(GLOBAL_VALIDATOR) {
+            Ok(validator) => validator.add(confirmed_metadata.owned.clone()),
+            Err(_) => {
+                self.backend.free(&chunk.descriptor);
+                return Err(ZAllocError::Other);
+            }
+        }
 
         // Create buffer's info
         let info = ShmBufInfo::new(
@@ -1030,7 +1040,7 @@ where
         // Create and store busy chunk
         zlock!(self.busy_list).push(BusyChunk::new(allocated_metadata));
 
-        shmb
+        Ok(shmb)
     }
 }
 
@@ -1060,7 +1070,7 @@ where
         let chunk = policy.alloc_async(backend_layout, self).await?;
 
         // wrap allocated chunk to ShmBufInner
-        let wrapped = self.wrap(chunk, size, allocated_metadata, confirmed_metadata);
+        let wrapped = self.wrap(chunk, size, allocated_metadata, confirmed_metadata)?;
         // SAFETY: `wrapped` is guaranteed to be valid as it represents an allocated chunk.
         Ok(unsafe { ZShmMut::new_unchecked(wrapped) })
     }

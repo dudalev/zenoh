@@ -106,6 +106,9 @@ zenoh-uring = { workspace = true, optional = true }
 zenoh-util = { workspace = true }
 
 [dev-dependencies]
+# LOCAL PATCH: `tests/shm_tx_at_process_exit.rs` orders zenoh-shm's statics' registration,
+# which its `test` feature makes public (BER-2486).
+zenoh-shm = { workspace = true, features = ["test"] }
 quinn = { workspace = true }
 rustls = { workspace = true }
 zenoh-protocol = { workspace = true, features = ["test"] }

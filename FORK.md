@@ -49,7 +49,8 @@ yet at the commit that introduced the table.
   sender's pool before any message needs it and releases the mount when the link closes.
   Nothing `mlock`s a mapping, so locked memory does not limit shared memory at all. A read
   of zenoh-shm's statics after process exit has finalized them fails instead of panicking,
-  but for one, named below.
+  so an allocation then fails, and a send that would have copied its payload into shared
+  memory sends it inline as it is.
   A transport manager that has begun to close runs no accept handshake, dials nothing, admits
   no new unicast transport and delivers nothing, so a closing session maps no shared-memory
   buffer. It refuses a transport with no Close frame, so the healthy peer whose dial it
@@ -61,11 +62,8 @@ yet at the commit that introduced the table.
   exit begins, accept or open, is refused where it reaches the transport's own static, the
   shared-memory handoff reactor, whether exit has finalized it or it was never initialized:
   with no Close frame, and nothing logged above DEBUG. Not covered: a map that takes longer
-  than 1 s can still meet a finalized static, and so can an allocation of a shared-memory
-  buffer, which reads zenoh-shm's watchdog validator with the panicking accessor
-  (`ShmProvider::wrap`). A transport allocates one, with no exit hold, to send a payload of
-  at least `message_size_threshold` that is not in shared memory already. And zenohd builds
-  with shared memory by default.
+  than 1 s can still meet a finalized static. And zenohd builds with shared memory by
+  default.
 * **A query no longer waits on a peer that has closed.** A closing face takes itself out of
   every cached route and only then finalizes its pending queries. Upstream left a closed peer
   in the routes of a peer that had not yet had its answer to the initial interest, so the next
