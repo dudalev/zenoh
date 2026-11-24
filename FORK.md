@@ -153,12 +153,16 @@ or `cargo test -p zenohd --test attachments`.
 | `--no-default-features -F transport_tcp,shared-memory` (the consumer's set then; it has since added `unstable`) | 1 | builds clean |
 
 At tag `hecate-1.10.2-7`, measured 2026-11-24 on the same toolchain, with other builds running
-on the host:
+on the host. The tag was cut at `1669dc033` and moves to the code of the later rows, which
+adds BER-2479, BER-2480, BER-2486 and BER-2487:
 
-| command | runs | result |
-|---|---|---|
-| the full-feature command above | 2 | green both times, 118 test binaries and 37 doc-test sets, 960 passed / 0 failed / 126 ignored |
-| `cargo build -p zenoh --no-default-features -F transport_tcp,shared-memory`, and with `,unstable` (the consumer's set) | 1 each | builds clean |
+| command | at | runs | result |
+|---|---|---|---|
+| the full-feature command above | `1669dc033` | 2 | green both times, 118 test binaries and 37 doc-test sets, 960 passed / 0 failed / 126 ignored |
+| `cargo build -p zenoh --no-default-features -F transport_tcp,shared-memory`, and with `,unstable` (the consumer's set) | `1669dc033` | 1 each | builds clean |
+| the full-feature command above | the later code | 1 | green, 123 test binaries and 37 doc-test sets, 973 passed / 0 failed / 126 ignored |
+| the consumer's two builds, as above | the later code | 1 each | builds clean |
+| `cargo doc -p zenoh-test`, and with `--features sessions` | the later code | 1 each | builds clean |
 
 `tests::link_weights` picks its routers' ports free and binds them only as each router opens,
 so another test of the binary can take one in between. It then opens its routers again on new
@@ -281,3 +285,10 @@ That is expected to HANG, not to fail, and the difference matters if you run it:
 `--exclude zenoh-uring`, so it includes that crate's `reader` target, which does not
 terminate and has to be killed by hand. It also includes upstream's `regions` scenarios,
 whose failures are timeouts whose count moves run to run.
+
+A run with `--include-ignored` and `transport_unixpipe` on HANGS as well, on three tests
+upstream ignores without giving a reason (`fa0bc23f7`): `transport_whitelist_unixpipe` in
+`io/zenoh-transport/tests/transport_whitelist.rs`, `transport_unixpipe_concurrent` in
+`unicast_concurrent.rs` and `transport_unixpipe_simultaneous` in `unicast_simultaneous.rs`.
+Each hangs after its body has finished. They hang the same way with their files as they
+were before BER-2480, so a hang there is not a regression (BER-2487).
