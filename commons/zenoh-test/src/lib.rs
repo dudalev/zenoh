@@ -14,8 +14,8 @@
 
 //! Shared test utilities for the Zenoh workspace.
 //!
-//! This crate provides [`TestSessions`], a helper that manages the lifecycle of
-//! Zenoh sessions used in integration tests:
+//! This crate provides `TestSessions`, with its `sessions` feature, a helper that manages the
+//! lifecycle of Zenoh sessions used in integration tests:
 //!
 //! * Dynamic port allocation (`tcp/127.0.0.1:0`) to avoid port collisions during
 //!   parallel test execution.
@@ -37,7 +37,8 @@
 //!
 //! A test that scouts does so in a [`ScoutingGroup`] of its own, so that it finds the
 //! sessions and routers it starts and no zenoh the host runs. A test whose subject needs a
-//! router runs the zenohd built from this workspace, through [`Zenohd`].
+//! router runs the zenohd built from this workspace, through `Zenohd`, with the `sessions`
+//! feature.
 //!
 //! # Files a test binds
 //!
@@ -73,7 +74,7 @@ use zenoh_link::EndPoint;
 use zenoh_protocol::core::EndPoints;
 use zenoh_protocol::core::Parameters;
 
-/// Default timeout applied to async operations via [`ztimeout!`].
+/// Default timeout applied to async operations via [`ztimeout!`](zenoh_core::ztimeout).
 pub const TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How often a wait below checks again.

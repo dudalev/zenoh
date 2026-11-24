@@ -39,7 +39,15 @@ use super::{canon::Canonize, OwnedKeyExpr, OwnedNonWildKeyExpr};
 /// * Key expression must be in canon-form (this ensure that key expressions representing the same set are always the same string).
 ///   Note that safe constructors will perform canonization for you if this can be done without extraneous allocations.
 ///
-/// Since Key Expressions define sets of keys, you may want to be aware of the hierarchy of [relations](keyexpr::relation_to) between such sets:
+// LOCAL PATCH: `relation_to` exists only with `unstable`, and so does the link to it (BER-2487).
+#[cfg_attr(
+    feature = "unstable",
+    doc = " Since Key Expressions define sets of keys, you may want to be aware of the hierarchy of [relations](keyexpr::relation_to) between such sets:"
+)]
+#[cfg_attr(
+    not(feature = "unstable"),
+    doc = " Since Key Expressions define sets of keys, you may want to be aware of the hierarchy of relations between such sets:"
+)]
 /// * Trivially, two sets can have no elements in common: `a/**` and `b/**` for example define two disjoint sets of keys.
 /// * Two sets [intersect](keyexpr::intersects()) if they have at least one element in common. `a/*` intersects `*/a` on `a/a` for example.
 /// * One set A [includes](keyexpr::includes()) the other set B if all of B's elements are in A: `a/*/**` includes `a/b/**`
