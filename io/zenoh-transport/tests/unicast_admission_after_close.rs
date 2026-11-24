@@ -13,7 +13,8 @@
 //
 //! A transport manager that has begun to close admits no new unicast transport
 //! (BER-2230), whichever side began it: a link it dials, or one whose accept was already
-//! in flight when it began to close. Each case has an open-manager control.
+//! in flight when it began to close. It does not dial at all (BER-2479). Each case has an
+//! open-manager control.
 //!
 //! `TransportManager::close` drains its transport table before closing what it drained,
 //! so a transport admitted after the drain would never be closed and would outlive
@@ -276,6 +277,38 @@ async fn dial(close_first: bool, first_zid: u8) {
     ztimeout!(peer.close());
 }
 
+/// A dial to a bare TCP listener, which shows whether a connection arrives at all.
+async fn dial_bare(close_first: bool, zid: u8) {
+    init_log();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (dialer, _) = manager(zid);
+    if close_first {
+        ztimeout!(dialer.close());
+    }
+    let dialling = tokio::spawn({
+        let dialer = dialer.clone();
+        async move { dialer.open_transport_unicast(endpoint(port)).await }
+    });
+
+    if close_first {
+        let dialled = ztimeout!(dialling).unwrap();
+        assert!(dialled.is_err(), "a closed manager must refuse to dial");
+        // The dial has returned, so a connection it made would be queued by now.
+        let connected = tokio::time::timeout(POLL * 10, listener.accept()).await;
+        assert!(
+            connected.is_err(),
+            "a closed manager must open no link: {connected:?}"
+        );
+    } else {
+        // THE CONTROL: open, the same dial connects. The bare listener never answers its
+        // InitSyn, so the dial is stopped here.
+        ztimeout!(listener.accept()).unwrap();
+        dialling.abort();
+        ztimeout!(dialer.close());
+    }
+}
+
 /// A link whose accept was in flight when the acceptor began to close.
 async fn held_accept(close: bool, first_zid: u8) {
     init_log();
@@ -361,6 +394,18 @@ async fn a_closed_manager_admits_no_transport_it_dials() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_open_manager_admits_the_transport_it_dials() {
     dial(false, 0x13).await;
+}
+
+/// **A CLOSED MANAGER OPENS NO LINK.** It refuses before it dials, so no handshake runs on
+/// a manager that would admit nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_closed_manager_opens_no_link() {
+    dial_bare(true, 0x31).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_open_manager_opens_the_link() {
+    dial_bare(false, 0x33).await;
 }
 
 /// **A CLOSING MANAGER ADMITS NO TRANSPORT WHOSE ACCEPT WAS ALREADY IN FLIGHT.**

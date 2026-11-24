@@ -50,10 +50,11 @@ yet at the commit that introduced the table.
   Nothing `mlock`s a mapping, so locked memory does not limit shared memory at all. A read
   of zenoh-shm's statics after process exit has finalized them fails instead of panicking,
   but for one, named below.
-  A transport manager that has begun to close runs no accept handshake, admits no new unicast
-  transport and delivers nothing, so a closing session maps no shared-memory buffer. It
-  refuses a transport with no Close frame, so the healthy peer whose dial it refuses logs no
-  ERROR, and it counts what it did not deliver and logs the count at DEBUG when it has closed.
+  A transport manager that has begun to close runs no accept handshake, dials nothing, admits
+  no new unicast transport and delivers nothing, so a closing session maps no shared-memory
+  buffer. It refuses a transport with no Close frame, so the healthy peer whose dial it
+  refuses logs no ERROR, and it counts what it did not deliver and logs the count at DEBUG
+  when it has closed.
   A process that has begun to exit with a shared-memory session open does the same, on unix
   only: an `atexit` hook marks exit as begun before zenoh-shm's statics are finalized, and
   waits for the maps already in flight, for at most 1 s. A handshake already running when

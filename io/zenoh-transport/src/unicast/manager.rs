@@ -880,6 +880,18 @@ impl TransportManager {
         mut endpoint: EndPoint,
         expected_zid: Option<&ZenohIdProto>,
     ) -> ZResult<TransportUnicast> {
+        // A closing manager, or a process that has begun to exit, opens no link: it would
+        // admit nothing, and at exit the handshake reads statics that are being finalized
+        // (BER-2230, BER-2479).
+        if self.is_closed() {
+            let e = zerror!(
+                "{} Closed: refusing to open a link to {}",
+                self.zid(),
+                endpoint
+            );
+            tracing::debug!("{e}");
+            return Err(e.into());
+        }
         if self
             .locator_inspector
             .is_multicast(&endpoint.to_locator())
