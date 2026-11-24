@@ -63,13 +63,29 @@ pub(crate) struct TransportLinkShmHandoff {
 }
 
 #[cfg(feature = "shared-memory")]
-impl From<LinkShmHandoffConfig> for TransportLinkShmHandoff {
-    fn from(value: LinkShmHandoffConfig) -> Self {
+impl TransportLinkShmHandoff {
+    /// Handoff off in both directions, which reads no shared-memory static.
+    pub(crate) fn disabled() -> Self {
         Self {
-            tx: value.tx.into(),
+            tx: TxHandoffStorage::new_disabled(),
+            rx: Arc::new(RxHandoffChannel::Disabled),
+            _premounted: Arc::new(Vec::new()),
+        }
+    }
+}
+
+/// Fails once process exit has begun to take away the reactor that TX handoff registers
+/// with (BER-2479).
+#[cfg(feature = "shared-memory")]
+impl TryFrom<LinkShmHandoffConfig> for TransportLinkShmHandoff {
+    type Error = zenoh_result::Error;
+
+    fn try_from(value: LinkShmHandoffConfig) -> ZResult<Self> {
+        Ok(Self {
+            tx: value.tx.try_into()?,
             rx: Arc::new(value.rx),
             _premounted: Arc::new(value.premounted),
-        }
+        })
     }
 }
 

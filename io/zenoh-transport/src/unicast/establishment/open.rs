@@ -28,8 +28,6 @@ use zenoh_protocol::{
 };
 use zenoh_result::ZResult;
 
-#[cfg(feature = "shared-memory")]
-use crate::common::shm::interop::LinkShmHandoffConfig;
 #[cfg(feature = "auth_usrpwd")]
 use crate::unicast::establishment::ext::auth::UsrPwdId;
 use crate::{
@@ -44,6 +42,8 @@ use crate::{
     },
     RemoteBoundCallback, TransportManager, TransportPeer,
 };
+#[cfg(feature = "shared-memory")]
+use crate::{common::shm::interop::LinkShmHandoffConfig, unicast::link::TransportLinkShmHandoff};
 
 type OpenError = (zenoh_result::Error, Option<u8>);
 
@@ -624,7 +624,7 @@ pub(crate) async fn open_link(
         link.clone(),
         config,
         #[cfg(feature = "shared-memory")]
-        LinkShmHandoffConfig::new_disabled().into(),
+        TransportLinkShmHandoff::disabled(),
     );
     let mut fsm = OpenLink {
         ext_qos: ext::qos::QoSFsm::new(),
@@ -789,10 +789,15 @@ pub(crate) async fn open_link(
         priorities: state.transport.ext_qos.priorities(),
         reliability: state.transport.ext_qos.reliability(),
     };
+    // A link with shared-memory handoff registers with a static that exit can finalize while
+    // this handshake runs (BER-2479). Refused with no Close frame: the acceptor has admitted
+    // the transport, and closes it when the link drops.
+    #[cfg(feature = "shared-memory")]
+    let shm_handoff = step!(TransportLinkShmHandoff::try_from(link_shm).map_err(|e| (e, None)));
     let o_link = link_unicast.reconfigure(
         o_config,
         #[cfg(feature = "shared-memory")]
-        link_shm.into(),
+        shm_handoff,
     );
     let s_link = format!("{o_link:?}");
     // Handle MixedReliability links
@@ -817,7 +822,7 @@ pub(crate) async fn open_link(
                 LinkUnicast::from(best_effort),
                 o_config,
                 #[cfg(feature = "shared-memory")]
-                LinkShmHandoffConfig::new_disabled().into(),
+                TransportLinkShmHandoff::disabled(),
             );
             Some(link)
         }

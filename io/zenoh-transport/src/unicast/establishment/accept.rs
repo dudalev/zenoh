@@ -34,8 +34,6 @@ use zenoh_result::ZResult;
 
 #[cfg(feature = "auth_usrpwd")]
 use super::ext::auth::UsrPwdId;
-#[cfg(feature = "shared-memory")]
-use crate::common::shm::interop::LinkShmHandoffConfig;
 use crate::{
     common::batch::BatchConfig,
     unicast::{
@@ -48,6 +46,8 @@ use crate::{
     },
     RemoteBoundCallback, TransportManager, TransportPeer,
 };
+#[cfg(feature = "shared-memory")]
+use crate::{common::shm::interop::LinkShmHandoffConfig, unicast::link::TransportLinkShmHandoff};
 
 pub(super) type AcceptError = (zenoh_result::Error, Option<u8>);
 
@@ -736,7 +736,7 @@ pub(crate) async fn accept_link(link: LinkUnicast, manager: &TransportManager) -
         link.clone(),
         config,
         #[cfg(feature = "shared-memory")]
-        LinkShmHandoffConfig::new_disabled().into(),
+        TransportLinkShmHandoff::disabled(),
     );
     let mut fsm = AcceptLink {
         link: &mut link_unicast,
@@ -895,10 +895,15 @@ pub(crate) async fn accept_link(link: LinkUnicast, manager: &TransportManager) -
         priorities: state.transport.ext_qos.priorities(),
         reliability: state.transport.ext_qos.reliability(),
     };
+    // A link with shared-memory handoff registers with a static that exit can finalize while
+    // this handshake runs (BER-2479). Refused with no Close frame, as `init_transport_unicast`
+    // refuses once exit has begun.
+    #[cfg(feature = "shared-memory")]
+    let shm_handoff = step!(TransportLinkShmHandoff::try_from(link_shm).map_err(|e| (e, None)));
     let a_link = link_unicast.reconfigure(
         a_config,
         #[cfg(feature = "shared-memory")]
-        link_shm.into(),
+        shm_handoff,
     );
     let s_link = format!("{a_link:?}");
     // Handle MixedReliability links
@@ -923,7 +928,7 @@ pub(crate) async fn accept_link(link: LinkUnicast, manager: &TransportManager) -
                 LinkUnicast::from(best_effort),
                 o_config,
                 #[cfg(feature = "shared-memory")]
-                LinkShmHandoffConfig::new_disabled().into(),
+                TransportLinkShmHandoff::disabled(),
             );
             Some(link)
         }

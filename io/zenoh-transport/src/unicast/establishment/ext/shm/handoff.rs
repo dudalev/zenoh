@@ -20,7 +20,7 @@ use std::{
 };
 
 use flume::{Sender, TryRecvError};
-use static_init::dynamic;
+use static_init::{dynamic, Phase};
 use zenoh_buffers::{
     reader::{DidntRead, Reader},
     writer::{DidntWrite, Writer},
@@ -28,7 +28,7 @@ use zenoh_buffers::{
 use zenoh_codec::{RCodec, WCodec, Zenoh080};
 use zenoh_core::zlock;
 use zenoh_protocol::core::{Priority, Reliability};
-use zenoh_result::ZResult;
+use zenoh_result::{bail, ZResult};
 use zenoh_runtime::ZRuntime;
 use zenoh_shm::ShmBufHardRef;
 
@@ -147,6 +147,26 @@ impl HandoffReactor {
     }
 }
 
+/// Runs `f` on the reactor, or fails where reading it would panic: once process exit has
+/// finalized it, or, if it was never initialized, once exit has begun.
+///
+/// A handshake can still be running when exit finalizes the reactor (BER-2479). The
+/// accessor rule is zenoh-shm's `statics.rs` (BER-2175).
+fn with_live_reactor<R>(f: impl FnOnce(&HandoffReactor) -> R) -> ZResult<R> {
+    match GLOBAL_HANDOFF_REACTOR.try_read() {
+        Ok(reactor) => Ok(f(&reactor)),
+        Err(e) if e.phase.intersects(Phase::FINALIZED) => {
+            bail!("SHM handoff reactor unavailable: process exit has finalized it")
+        }
+        // Never initialized: initializing it panics too once static_init has finalized its
+        // statics, as it then refuses to register one. Exit has begun before that.
+        Err(_) if crate::common::exit::has_begun() => {
+            bail!("SHM handoff reactor unavailable: process exit has begun")
+        }
+        Err(_) => Ok(f(&GLOBAL_HANDOFF_REACTOR.read())),
+    }
+}
+
 #[derive(Debug)]
 struct TxHandoffTask {
     counter: ShmTXCounterLease,
@@ -181,14 +201,10 @@ pub struct TxHandoffInner {
 }
 
 impl TxHandoffInner {
-    pub fn new(counter: ShmTXCounterLease) -> Self {
+    fn new(reactor: &HandoffReactor, counter: ShmTXCounterLease) -> Self {
         let task = Arc::new(TxHandoffTask::new(counter));
 
-        GLOBAL_HANDOFF_REACTOR
-            .read()
-            .task_sender
-            .send(task.clone())
-            .unwrap();
+        reactor.task_sender.send(task.clone()).unwrap();
 
         Self {
             task,
@@ -203,8 +219,8 @@ pub struct TxHandoff {
 }
 
 impl TxHandoff {
-    pub fn new(counter: ShmTXCounterLease) -> Self {
-        let inner = Arc::new(TxHandoffInner::new(counter));
+    fn new(reactor: &HandoffReactor, counter: ShmTXCounterLease) -> Self {
+        let inner = Arc::new(TxHandoffInner::new(reactor, counter));
         Self { inner }
     }
 
@@ -261,15 +277,21 @@ impl TxHandoffStorage {
     }
 }
 
-impl From<TxHandoffChannel> for TxHandoffStorage {
-    fn from(value: TxHandoffChannel) -> Self {
-        match value.0 {
+/// Fails once process exit has begun to take the reactor away, which every enabled handoff
+/// registers with.
+impl TryFrom<TxHandoffChannel> for TxHandoffStorage {
+    type Error = zenoh_result::Error;
+
+    fn try_from(value: TxHandoffChannel) -> ZResult<Self> {
+        Ok(match value.0 {
             HandoffConfig::PerPrio(prio_container) => {
-                let prio_container = prio_container.map(TxHandoff::new);
+                let prio_container = with_live_reactor(|reactor| {
+                    prio_container.map(|counter| TxHandoff::new(reactor, counter))
+                })?;
                 Self(HandoffConfig::PerPrio(prio_container))
             }
             HandoffConfig::Disabled => Self(HandoffConfig::Disabled),
-        }
+        })
     }
 }
 
@@ -491,7 +513,7 @@ mod race_tests {
 
         let auth_segment = Arc::new(TXAuthSegment::create(0, &[]).unwrap());
         let lease = ShmTXCounterLease::new(auth_segment).unwrap();
-        let handoff = TxHandoff::new(lease);
+        let handoff = with_live_reactor(|reactor| TxHandoff::new(reactor, lease)).unwrap();
 
         let h_a = handoff.clone();
         let h_b = handoff.clone();
