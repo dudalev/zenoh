@@ -62,3 +62,6 @@ winapi = { workspace = true }
 
 [dev-dependencies]
 libc = { workspace = true }
+# LOCAL PATCH: `tests/static_finalization.rs` parses this crate's sources (BER-2486).
+proc-macro2 = { workspace = true, features = ["span-locations"] }
+syn = { workspace = true, features = ["full", "visit"] }

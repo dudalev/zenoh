@@ -30,115 +30,301 @@
 //! exit's own error message was good; the panic landed after it and pointed into
 //! this crate instead, so the real cause read as a footnote.
 //!
-//! `Segment::drop` in `posix_shm/segment.rs` already guards this, with the
-//! reasoning in its own comment -- *"this drop might be executed inside static
-//! drop callstack, so statics might not be available here"*. It was the only
-//! site that did.
-//!
 //! THIS IS A SOURCE SCAN, and deliberately so. The condition it rules out is a
 //! PANIC during process teardown, which no behavioural test in this crate can
-//! reach: finalization happens once, after the harness has finished. What can be
-//! checked is that no production site holds the panicking accessor, which is the
-//! property that keeps the bug from coming back by a route nobody is watching.
+//! reach for every site: finalization happens once, after the harness has
+//! finished. What can be checked is that no production site holds the panicking
+//! accessor, which is the property that keeps the bug from coming back by a route
+//! nobody is watching.
+//!
+//! It PARSES the sources with `syn`. It matched their text one line at a time
+//! until BER-2486, and passed with `ShmProvider::wrap` reading the validator with
+//! `.read()` written over three lines.
 
-use std::{fs, path::Path};
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::{Path, PathBuf},
+};
 
-/// Every `#[dynamic(lazy, drop)]` static in this crate. Each one finalizes
-/// independently, so each is a separate way to panic.
-const FINALIZABLE_STATICS: &[&str] = &[
-    "GLOBAL_VALIDATOR",
-    "GLOBAL_CONFIRMATOR",
-    "GLOBAL_METADATA_STORAGE",
-    "GLOBAL_METADATA_SUBSCRIPTION",
-    "GLOBAL_CLIENT_STORAGE",
-    "CLEANUP",
-];
+use proc_macro2::{Delimiter, Ident, TokenStream, TokenTree};
+use syn::visit::{self, Visit};
 
-fn rust_sources(dir: &Path, out: &mut Vec<(String, String)>) {
+/// Every `.rs` file under `dir`, parsed. A file `syn` cannot parse fails the scan, rather
+/// than being passed over.
+fn parse_sources(dir: &Path, out: &mut Vec<(PathBuf, syn::File)>) {
     let entries = fs::read_dir(dir).expect("the crate's src directory must be readable");
     for entry in entries {
         let path = entry.expect("a readable directory entry").path();
         if path.is_dir() {
-            rust_sources(&path, out);
+            parse_sources(&path, out);
         } else if path.extension().is_some_and(|e| e == "rs") {
             let text = fs::read_to_string(&path).expect("a readable .rs file");
-            out.push((path.display().to_string(), text));
+            let file = syn::parse_file(&text)
+                .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+            out.push((path, file));
         }
     }
 }
 
+/// The statics a static_init `dynamic` attribute with `drop` declares: the ones finalized at
+/// process exit. Found in the code rather than listed, so that a new one is covered.
+#[derive(Default)]
+struct Finalizable(BTreeSet<String>);
+
+impl<'ast> Visit<'ast> for Finalizable {
+    fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
+        let drops = item.attrs.iter().any(|attr| {
+            let dynamic = attr
+                .path()
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "dynamic");
+            let drop = match &attr.meta {
+                syn::Meta::List(list) => list
+                    .tokens
+                    .clone()
+                    .into_iter()
+                    .any(|token| matches!(token, TokenTree::Ident(ident) if ident == "drop")),
+                _ => false,
+            };
+            dynamic && drop
+        });
+        if drops {
+            self.0.insert(item.ident.to_string());
+        }
+        visit::visit_item_static(self, item);
+    }
+}
+
+/// A read of one of `statics` with `.read()`, and every other use of one, in a file.
+struct Reads<'a> {
+    statics: &'a BTreeSet<String>,
+    /// The line and the static of each `.read()`.
+    panicking: Vec<(usize, String)>,
+    /// The statics this file uses, by any name it parses: a method call, a path, a macro's
+    /// argument.
+    used: BTreeSet<String>,
+}
+
+impl<'a> Reads<'a> {
+    fn new(statics: &'a BTreeSet<String>) -> Self {
+        Self {
+            statics,
+            panicking: Vec::new(),
+            used: BTreeSet::new(),
+        }
+    }
+
+    fn is_static(&self, ident: &Ident) -> Option<String> {
+        let name = ident.to_string();
+        self.statics.contains(&name).then_some(name)
+    }
+
+    /// The static an expression names: a path, possibly in parentheses.
+    fn static_named(&self, expr: &syn::Expr) -> Option<String> {
+        match expr {
+            syn::Expr::Paren(inner) => self.static_named(&inner.expr),
+            syn::Expr::Group(inner) => self.static_named(&inner.expr),
+            syn::Expr::Path(path) => self.is_static(&path.path.segments.last()?.ident),
+            _ => None,
+        }
+    }
+
+    /// A macro's arguments, which `syn` leaves as tokens: `STATIC . read ( )`, however it is
+    /// laid out.
+    fn scan_tokens(&mut self, tokens: TokenStream) {
+        let tokens: Vec<TokenTree> = tokens.into_iter().collect();
+        for (i, token) in tokens.iter().enumerate() {
+            match token {
+                TokenTree::Group(group) => self.scan_tokens(group.stream()),
+                TokenTree::Ident(ident) => {
+                    let Some(name) = self.is_static(ident) else {
+                        continue;
+                    };
+                    self.used.insert(name.clone());
+                    if let (
+                        Some(TokenTree::Punct(dot)),
+                        Some(TokenTree::Ident(read)),
+                        Some(TokenTree::Group(args)),
+                    ) = (tokens.get(i + 1), tokens.get(i + 2), tokens.get(i + 3))
+                    {
+                        if dot.as_char() == '.'
+                            && read == "read"
+                            && args.delimiter() == Delimiter::Parenthesis
+                            && args.stream().is_empty()
+                        {
+                            self.panicking.push((read.span().start().line, name));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for Reads<'_> {
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        if call.method == "read" && call.args.is_empty() {
+            if let Some(name) = self.static_named(&call.receiver) {
+                self.panicking.push((call.method.span().start().line, name));
+            }
+        }
+        visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        self.scan_tokens(mac.tokens.clone());
+        visit::visit_macro(self, mac);
+    }
+
+    /// Everything but the name: a static's declaration is not a use of it.
+    fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
+        for attr in &item.attrs {
+            self.visit_attribute(attr);
+        }
+        self.visit_type(&item.ty);
+        self.visit_expr(&item.expr);
+    }
+
+    fn visit_ident(&mut self, ident: &'ast Ident) {
+        if let Some(name) = self.is_static(ident) {
+            self.used.insert(name);
+        }
+    }
+}
+
+/// The `.read()`s of `statics` in `source`, as (line, static).
+fn panicking_reads(source: &str, statics: &BTreeSet<String>) -> Vec<(usize, String)> {
+    let file = syn::parse_file(source).expect("the sample parses");
+    let mut reads = Reads::new(statics);
+    reads.visit_file(&file);
+    reads.panicking
+}
+
 /// No production site may use the PANICKING accessor on a finalizable static.
 ///
-/// Two-sided: the scan must also find the statics at all, or a rename would make
-/// it vacuous and it would pass by looking at nothing.
+/// Two-sided: the scan must also find the statics, and see each of them used, or a rename
+/// or a construct it does not parse would make it vacuous and it would pass by looking at
+/// nothing.
 #[test]
 fn no_production_site_reads_a_finalizable_static_with_the_panicking_accessor() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
-    rust_sources(&src, &mut files);
+    parse_sources(&src, &mut files);
     assert!(
         !files.is_empty(),
         "no .rs files found under {src:?} -- fix the walk"
     );
 
-    let mut mentions = 0usize;
-    let mut offenders = Vec::new();
+    let mut finalizable = Finalizable::default();
+    for (_, file) in &files {
+        finalizable.visit_file(file);
+    }
+    let statics = finalizable.0;
+    assert!(
+        !statics.is_empty(),
+        "no `#[dynamic(.., drop)]` static found under {src:?} -- fix the attribute match"
+    );
 
-    for (path, text) in &files {
-        for (lineno, line) in text.lines().enumerate() {
-            let code = line.split("//").next().unwrap_or(line);
-            for name in FINALIZABLE_STATICS {
-                if !code.contains(name) {
-                    continue;
-                }
-                mentions += 1;
-                // `.init()` is the eager-init path and cannot be finalized yet;
-                // `.try_read()` is the whole point of this test.
-                if code.contains(&format!("{name}.read()")) {
-                    offenders.push(format!("{path}:{} -- {}", lineno + 1, code.trim()));
-                }
-            }
+    let mut used = BTreeSet::new();
+    let mut offenders = Vec::new();
+    for (path, file) in &files {
+        let mut reads = Reads::new(&statics);
+        reads.visit_file(file);
+        used.extend(reads.used);
+        for (line, name) in reads.panicking {
+            offenders.push(format!("{}:{line} -- {name}.read()", path.display()));
         }
     }
 
-    // NON-VACUITY: the statics must actually appear, or the scan proves nothing.
+    // NON-VACUITY: a static the scan never sees used is one it cannot check.
+    let unseen: Vec<_> = statics.difference(&used).collect();
     assert!(
-        mentions >= FINALIZABLE_STATICS.len(),
-        "found only {mentions} mentions of {} statics -- the names have moved and this \
-         scan is looking at nothing",
-        FINALIZABLE_STATICS.len()
+        unseen.is_empty(),
+        "the scan sees no use of {unseen:?} beside its declaration, so it checks nothing \
+         for it -- fix the scan"
     );
 
     assert!(
         offenders.is_empty(),
         "these sites would PANIC if the static is already FINALIZED at process \
-         exit -- use `.try_read()` and degrade, as `Segment::drop` does:\n  {}",
+         exit -- use `try_live_read!` and fail, as `alloc_resources` does, or \
+         `.try_read()` where the static is already initialized, as `Segment::drop` \
+         does:\n  {}",
         offenders.join("\n  ")
     );
 }
 
-/// THE CONTROL for the test above: it can actually see a panicking accessor.
-///
-/// Without this, a scan whose matcher silently stopped working would report a
-/// clean bill of health, which is the failure mode the scan exists to prevent.
+/// THE CONTROL for the scan above: it sees the panicking accessor however the call is laid
+/// out, and nothing else.
 #[test]
-fn the_scan_detects_a_panicking_accessor_when_one_is_present() {
-    let sample = "        GLOBAL_VALIDATOR.read().remove(self.descriptor.clone());";
-    let code = sample.split("//").next().unwrap_or(sample);
-    assert!(
-        code.contains("GLOBAL_VALIDATOR.read()"),
-        "the matcher must recognise the exact shape this test bans"
-    );
-
-    // And it must NOT fire on the accepted forms.
-    for ok in [
-        "        if let Ok(validator) = GLOBAL_VALIDATOR.try_read() {",
-        "    GLOBAL_VALIDATOR.init();",
+fn the_scan_tells_the_panicking_accessor_from_the_others() {
+    let statics = BTreeSet::from(["GLOBAL_VALIDATOR".to_string()]);
+    for (source, line) in [
+        // `ShmProvider::wrap` until BER-2486: three lines.
+        (
+            "fn f() {\n    GLOBAL_VALIDATOR\n        .read()\n        .add(x);\n}",
+            3,
+        ),
+        ("fn f() { GLOBAL_VALIDATOR.read().add(x); }", 1),
+        (
+            "fn f() { crate::watchdog::validator::GLOBAL_VALIDATOR.read(); }",
+            1,
+        ),
+        ("fn f() { (GLOBAL_VALIDATOR).read(); }", 1),
+        // In a macro's arguments, which are tokens to `syn`.
+        (
+            "fn f() {\n    debug!(\"{:?}\", GLOBAL_VALIDATOR\n        .read());\n}",
+            3,
+        ),
     ] {
-        let code = ok.split("//").next().unwrap_or(ok);
-        assert!(
-            !code.contains("GLOBAL_VALIDATOR.read()"),
-            "the matcher must accept `try_read` and `init`: {ok}"
+        assert_eq!(
+            panicking_reads(source, &statics),
+            vec![(line, "GLOBAL_VALIDATOR".to_string())],
+            "must be flagged, on line {line}: {source}"
         );
     }
+
+    // The accepted forms, a mention, prose, and another receiver.
+    for source in [
+        "fn f() { if let Ok(v) = GLOBAL_VALIDATOR.try_read() { v.add(x); } }",
+        "fn f() { GLOBAL_VALIDATOR.init(); }",
+        "fn f() { let v = try_live_read!(GLOBAL_VALIDATOR); }",
+        "fn f() { GLOBAL_VALIDATOR.read_only(); }",
+        "fn f() { GLOBAL_VALIDATOR.read(timeout); }",
+        "/// `GLOBAL_VALIDATOR.read()` panics at exit.\nfn f() {}",
+        "fn f() {\n    // GLOBAL_VALIDATOR.read()\n}",
+        "fn f() { let s = \"GLOBAL_VALIDATOR.read()\"; }",
+        "fn f() { OTHER.read(); }",
+        "macro_rules! m { ($st:path) => { $st.read() }; }",
+    ] {
+        assert_eq!(
+            panicking_reads(source, &statics),
+            vec![],
+            "must not be flagged: {source}"
+        );
+    }
+}
+
+/// THE CONTROL for the attribute match: a static is finalizable when its `dynamic` attribute
+/// says `drop`, however the attribute is written.
+#[test]
+fn the_scan_finds_the_statics_finalized_at_exit() {
+    let file = syn::parse_file(
+        "#[dynamic(lazy, drop)] static mut A: u8 = 0;\n\
+         #[static_init::dynamic(drop)] static B: u8 = 0;\n\
+         #[dynamic(lazy)] static mut C: u8 = 0;\n\
+         #[other(drop)] static D: u8 = 0;\n\
+         static E: u8 = 0;\n\
+         mod m { #[dynamic(lazy, drop)] pub(crate) static mut F: u8 = 0; }",
+    )
+    .unwrap();
+    let mut finalizable = Finalizable::default();
+    finalizable.visit_file(&file);
+    assert_eq!(
+        finalizable.0,
+        BTreeSet::from(["A".to_string(), "B".to_string(), "F".to_string()])
+    );
 }
