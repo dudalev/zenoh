@@ -24,7 +24,7 @@ use std::{
 use async_trait::async_trait;
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 use zenoh_core::{zasynclock, zcondfeat, zread, zwrite};
-use zenoh_link::Link;
+use zenoh_link::{Link, LinkUnicast};
 use zenoh_protocol::{
     core::{Bound, Priority, RegionName, WhatAmI, ZenohIdProto},
     network::NetworkMessageMut,
@@ -35,7 +35,10 @@ use zenoh_result::{bail, zerror, ZResult};
 #[cfg(feature = "shared-memory")]
 use crate::common::shm::shm_context::UnicastTransportShmContext;
 use crate::{
-    common::priority::{TransportPriorityRx, TransportPriorityTx},
+    common::{
+        pipeline::TransmissionPipelineProducer,
+        priority::{TransportPriorityRx, TransportPriorityTx},
+    },
     unicast::{
         authentication::TransportAuthId,
         link::{LinkUnicastWithOpenAck, TransportLinkUnicastDirection},
@@ -151,6 +154,17 @@ impl TransportUnicastUniversal {
     /*************************************/
     /*           TERMINATION             */
     /*************************************/
+    /// Whether the peer stays reachable on another link if `link` fails (BER-2554).
+    pub(super) fn has_link_other_than(&self, link: &LinkUnicast) -> bool {
+        zread!(self.links).has_link_other_than(|l| l.link.link == *link)
+    }
+
+    /// Whether the peer stays reachable on another link if the one with `pipeline` fails
+    /// (BER-2554).
+    pub(super) fn has_pipeline_other_than(&self, pipeline: &TransmissionPipelineProducer) -> bool {
+        zread!(self.links).has_link_other_than(|l| l.pipeline.ptr_eq(pipeline))
+    }
+
     pub(super) async fn delete(&self) -> ZResult<()> {
         tracing::debug!(
             "[{}] Closing transport with peer: {}",
@@ -588,6 +602,14 @@ impl TransportLinks {
             stl.into_inner(),
             asl.map(TransportLinkMarker::into_inner),
         ))
+    }
+
+    // Whether a link other than the one `is_it` matches is listed, an associated link counted
+    // with its main one.
+    fn has_link_other_than(&self, is_it: impl Fn(&TransportLinkUnicastUniversal) -> bool) -> bool {
+        self.inner
+            .iter()
+            .any(|l| matches!(l, TransportLinkMarker::Link(_)) && !is_it(l))
     }
 
     fn take(&mut self) -> Vec<TransportLinkUnicastUniversal> {

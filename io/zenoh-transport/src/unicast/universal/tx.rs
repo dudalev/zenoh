@@ -234,7 +234,14 @@ impl TransportUnicastUniversal {
         // block for fairly long time
         drop(transport_links);
 
-        let pushed = pipeline.push_network_message(msg)?;
+        let pushed = match pipeline.push_network_message(msg) {
+            Ok(pushed) => pushed,
+            // A link whose write failed refuses pushes. While the transport keeps another
+            // link the peer is reachable, so the message is dropped, and the transport is
+            // not closed (BER-2554).
+            Err(_) if self.has_pipeline_other_than(&pipeline) => return Ok(false),
+            Err(e) => return Err(e.into()),
+        };
 
         #[cfg(feature = "shared-memory")]
         if pushed {

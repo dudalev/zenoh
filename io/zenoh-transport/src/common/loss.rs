@@ -16,9 +16,11 @@
 //! A sender built from this fork leaves one frame SN unused on a channel after it drops a
 //! message there, so its next frame on that channel arrives with a gap of 2, which the
 //! receiver reports as [`RxLossKind::SnGap`]. A drop the sender never follows with a frame on
-//! that channel, and the batches a link held when it failed, reach no receiver: the new
-//! transport that replaces a failed link starts its SNs afresh. The sender reports the latter
-//! as a [`TxLoss`]. The fragment kinds report a reassembly that ended without a message.
+//! that channel, and the batches a link held when it failed or closed, reach no receiver: the
+//! new transport that replaces a failed link starts its SNs afresh. The sender reports the
+//! latter as a [`TxLoss`]. Batches already written to the socket are not counted, nor a push
+//! already under way in the instant the link fails or closes. The fragment kinds report a
+//! reassembly that ended without a message.
 //!
 //! The multicast receive path reports nothing here.
 //!
@@ -123,11 +125,17 @@ pub struct TxLoss {
 /// What a sender lost. Exhaustive, so that zenoh maps every kind to a push drop reason.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TxLossKind {
-    /// A link's write failed, or its flush at close did, with `batches` batches of that
-    /// priority queued or being written. Their messages never reach the peer. Batches already
-    /// written to the socket are not counted, nor messages queued in the instant the write
-    /// failed.
-    Unsent { batches: usize },
+    /// A link's write found its connection closed or reset at the peer's end, with `batches`
+    /// batches of that priority queued or being written, and the transport had no other link
+    /// to the peer. This is what a peer whose process ends gives: its reader, gone with it,
+    /// loses nothing it would have read. A peer whose zenoh closes the link while its process
+    /// lives gives it too, and then its application has lost these messages.
+    ResetQueued { batches: usize },
+    /// A link held `batches` batches of that priority, queued or being written, that a reader
+    /// that is alive has lost: the link closed at this end while its peer was not reading (a
+    /// write at close found no room before the keep-alive timeout, or was cut short by the
+    /// close), or its write failed while the transport kept another link to the peer.
+    ClosedQueued { batches: usize },
     /// A `BlockFirst` push the transport had accepted found no batch before
     /// `wait_before_close`. The transport then closes.
     BlockFirstDropped,

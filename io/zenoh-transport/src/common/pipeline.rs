@@ -53,9 +53,11 @@ use crate::common::batch::BatchConfig;
 // the moves. They are always reused, so there is no allocation performance penalty.
 type BoxedWBatch = Box<WBatch>;
 
-// Twice the queue cap, so that the ring has room beside a full queue for ephemeral batches,
-// which are not counted against the cap (BER-2554).
-const RBLEN: usize = 2 * QueueSizeConf::MAX;
+// Only a stage's own batches enter its rings, at most its queue size of them, which is at most
+// the cap (asserted where the pipeline is made), so a ring push cannot find the ring full
+// (BER-2554).
+const RBLEN: usize = QueueSizeConf::MAX;
+const _: () = assert!(RBLEN >= QueueSizeConf::MAX && RBLEN.is_power_of_two());
 
 // Inner structure to reuse serialization batches
 struct StageInRefill {
@@ -130,6 +132,7 @@ impl StageInOut {
 
     #[inline]
     fn move_batch(&mut self, batch: BoxedWBatch) {
+        // Unreachable: see RBLEN (BER-2554).
         assert!(
             self.s_out_w.push(batch).is_none(),
             "a batch found the out ring full"
@@ -300,8 +303,6 @@ struct StageIn {
     mutex: StageInMutex,
     fragbuf: ZBuf,
     batching: bool,
-    // used for stop fragment
-    batch_config: BatchConfig,
 }
 
 impl StageIn {
@@ -450,24 +451,12 @@ impl StageIn {
                 // If no fragment has been sent, the sequence number is just reset
                 if fragment.ext_first.is_some() {
                     restore_sn!()
-                // Otherwise, an ephemeral batch is created to send the stop fragment, which
-                // takes the SN reserved for the next fragment
+                // Otherwise the SN reserved for the next fragment is given back. No stop
+                // fragment is sent: one has no payload, and a fragment with none does not
+                // encode. A gap at the receiver then means a message was lost, and not one
+                // that was sent again in full (BER-2554).
                 } else {
-                    let mut batch = Box::new(WBatch::new_ephemeral(self.batch_config));
-                    self.fragbuf.clear();
-                    fragment.ext_drop = Some(fragment::ext::Drop::new());
-                    // A stop fragment has no payload, and a fragment with none does not
-                    // encode. Its SN is then given back, so that a gap at the receiver means
-                    // a message was lost, and not one that was then sent again in full
-                    // (BER-2554).
-                    if batch
-                        .encode((&mut self.fragbuf.reader(), &mut fragment))
-                        .is_ok()
-                    {
-                        self.s_out.move_batch(batch);
-                    } else {
-                        tch.sn.set(fragment.sn).unwrap();
-                    }
+                    tch.sn.set(fragment.sn).unwrap();
                 }
             });
 
@@ -713,15 +702,21 @@ impl StageOut {
         self.s_ref.refill(batch);
     }
 
-    fn drain(&mut self, guard: &mut MutexGuard<'_, Current>) -> Vec<BoxedWBatch> {
+    // Takes the current batch only if no push holds its lock: a push waiting for a batch holds
+    // it for the whole wait, up to `wait_before_close`, and the TX runtime that drains has, by
+    // default, one thread for every link (BER-2554). A push waiting for a batch has no current batch, and
+    // is released when the consumer drops.
+    fn drain(&mut self) -> Vec<BoxedWBatch> {
         let mut batches = vec![];
         // Empty the ring buffer
         while let Some(batch) = self.s_in.s_out_r.pull() {
             batches.push(batch);
         }
         // Take the current batch
-        if let Some(batch) = guard.batch.take() {
-            batches.push(batch);
+        if let Ok(mut current) = self.s_in.current.try_lock() {
+            if let Some(batch) = current.batch.take() {
+                batches.push(batch);
+            }
         }
         batches
     }
@@ -834,7 +829,6 @@ impl TransmissionPipeline {
                 },
                 fragbuf: ZBuf::empty(),
                 batching: config.batching_enabled,
-                batch_config: config.batch,
             }));
 
             // The stage out for this priority
@@ -1016,6 +1010,10 @@ impl TransmissionPipelineProducer {
         Ok(sent)
     }
 
+    pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.stage_in, &other.stage_in)
+    }
+
     // If the queue is not QoS, it means that we only have one priority with index 0.
     #[inline]
     fn queue(&self, msg: NetworkMessageRef) -> (usize, Priority) {
@@ -1165,23 +1163,11 @@ impl PipelineConsumer for TransmissionPipelineConsumer {
     fn drain(&mut self) -> Vec<(BoxedWBatch, Priority)> {
         // Drain the remaining batches
         let mut batches = vec![];
-
-        // Acquire all the locks, in_guard first, out_guard later
-        // Use the same locking order as in disable to avoid deadlocks
-        let locks = self
-            .stage_out
-            .iter()
-            .map(|x| x.s_in.current.clone())
-            .collect::<Vec<_>>();
-        let mut currents: Vec<_> = locks.iter().map(|x| zlock!(x)).collect::<Vec<_>>();
-
         for (prio, s_out) in self.stage_out.iter_mut().enumerate() {
-            let mut bs = s_out.drain(&mut currents[prio]);
-            for b in bs.drain(..) {
+            for b in s_out.drain() {
                 batches.push((b, Priority::try_from(prio as u8).unwrap()));
             }
         }
-
         batches
     }
 }
@@ -1241,8 +1227,7 @@ impl PipelineConsumer for SplitTransmissionPipelineConsumer {
     }
 
     fn drain(&mut self) -> Vec<(BoxedWBatch, Priority)> {
-        let current = self.stage_out.s_in.current.clone();
-        let batches = self.stage_out.drain(&mut current.lock().unwrap());
+        let batches = self.stage_out.drain();
         batches.into_iter().map(|b| (b, self.priority)).collect()
     }
 }
@@ -1860,6 +1845,66 @@ mod tests {
         assert_eq!(send(&producer, &mut consumer, &small).await, 4);
 
         Ok(())
+    }
+
+    /// The consumer's drain does not wait for a push that is waiting for a batch, which holds
+    /// its stage's lock for the whole wait, and the push is released once the consumer drops
+    /// (BER-2554).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tx_pipeline_drain_does_not_wait_for_a_waiting_push() -> ZResult<()> {
+        let tct = TransportPriorityTx::make(Bits::from(TransportSn::MAX))?;
+        let (producer, mut consumer) =
+            TransmissionPipeline::make(CONFIG_NOT_STREAMED, std::slice::from_ref(&tct), false);
+        let express = droppable(Priority::DEFAULT, Reliability::Reliable, true, 8);
+        assert!(push(&producer, &express));
+        let (held, _) = timeout(TIMEOUT, consumer.pull()).await?.unwrap();
+
+        // A blocking push finds no batch, and waits up to `wait_before_close`.
+        let blocking = NetworkMessage::from(Push {
+            wire_expr: "test".into(),
+            ext_qos: ext::QoSType::new(Priority::DEFAULT, CongestionControl::Block, true),
+            ..Push::from(vec![0_u8; 8])
+        });
+        let waiting = std::thread::spawn({
+            let producer = producer.clone();
+            move || producer.push_network_message(blocking.as_ref())
+        });
+        while producer.stage_in[0].try_lock().is_ok() {
+            std::thread::sleep(SLEEP / 10);
+        }
+
+        let drained = task::spawn_blocking(move || {
+            let drained = consumer.drain();
+            (drained.len(), consumer)
+        });
+        let (drained, consumer) = timeout(CONFIG_NOT_STREAMED.wait_before_close / 2, drained)
+            .await
+            .expect("the drain waited for the push")?;
+        assert_eq!(drained, 0);
+        assert!(!waiting.is_finished());
+
+        drop(consumer);
+        drop(held);
+        assert!(waiting.join().unwrap().is_err(), "the push is released");
+
+        Ok(())
+    }
+
+    /// A batch that finds the out ring full stops the push with a panic, so that no batch is
+    /// ever discarded without a word. A ring holds a stage's own batches only, so this cannot
+    /// happen (BER-2554).
+    #[test]
+    #[should_panic(expected = "a batch found the out ring full")]
+    fn tx_pipeline_full_out_ring_refuses_a_batch() {
+        let tct = TransportPriorityTx::make(Bits::from(TransportSn::MAX)).unwrap();
+        let (producer, _consumer) =
+            TransmissionPipeline::make(CONFIG_NOT_STREAMED, std::slice::from_ref(&tct), false);
+        let mut stage_in = zlock!(producer.stage_in[0]);
+        for _ in 0..=RBLEN {
+            stage_in
+                .s_out
+                .move_batch(Box::new(WBatch::new(CONFIG_NOT_STREAMED.batch)));
+        }
     }
 
     /// A fragment with no payload, which is what a stop fragment is, does not encode, so the

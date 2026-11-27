@@ -576,21 +576,53 @@ fn pump(mut from: TcpStream, mut to: TcpStream, stalled: &AtomicBool, killed: &A
     // Dropping the sockets with data unread in them resets the connection.
 }
 
-/// A link that fails with batches queued reports them lost, by priority, to the publisher's
-/// push drop observer.
+/// Puts more than the sockets between a publisher and a stopped proxy can hold, so that the
+/// link's write blocks, and its queue fills: a drop alone can come from the process's TX thread
+/// being busy with other links.
+async fn overfill(publisher: &Publisher<'_>) {
+    for _ in 0..4_000 {
+        ztimeout!(publisher.put(vec![0_u8; 8 * PAYLOAD_SIZE])).unwrap();
+    }
+}
+
+/// A publishing peer that reaches the subscribing peer through a proxy, each config adjusted by
+/// `adjust`.
+async fn open_pair_through_proxy(
+    sessions: &mut TestSessions,
+    adjust: impl Fn(&mut zenoh_config::Config),
+) -> (Session, Session, Proxy) {
+    let mut listener = sessions.get_listener_config("tcp/127.0.0.1:0", 1);
+    adjust(&mut listener);
+    let subscribing = sessions.open_listener_with_cfg(listener).await;
+    let proxy = Proxy::start(&get_tcp_locator(&subscribing).await);
+    let mut connector = sessions.get_connector_config_with_endpoint(vec![proxy.endpoint.clone()]);
+    adjust(&mut connector);
+    let publishing = sessions.open_connector_with_cfg(connector).await;
+    (publishing, subscribing, proxy)
+}
+
+/// Waits until the publisher reports batches it queued for `subscriber`, of the `Data`
+/// priority and with no key, lost for the reason `lost` matches.
+async fn wait_queued_loss(subscriber: ZenohId, lost: fn(&PushDropReason) -> bool) {
+    wait_until("the link's queued batches are reported", || {
+        push_drops_to(subscriber).iter().any(|dropped| {
+            lost(&dropped.reason)
+                && dropped.key_expr.is_none()
+                && dropped.priority == Some(Priority::Data)
+        })
+    })
+    .await;
+}
+
+/// A link whose connection is reset at the subscriber's end, as a subscriber whose process ends
+/// resets it, reports the batches it queued as lost to a reader that is gone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_failed_link_reports_its_queued_batches() {
+async fn a_link_reset_at_its_peer_reports_its_queued_batches() {
     zenoh::init_log_from_env_or("error");
     install_observers();
-    const KEY: &str = "test/drop_observer/failed_link";
+    const KEY: &str = "test/drop_observer/reset_link";
     let mut sessions = TestSessions::new();
-    let subscribing = sessions.open_listener().await;
-    let proxy = Proxy::start(&get_tcp_locator(&subscribing).await);
-    let publishing = sessions
-        .open_connector_with_cfg(
-            sessions.get_connector_config_with_endpoint(vec![proxy.endpoint.clone()]),
-        )
-        .await;
+    let (publishing, subscribing, proxy) = open_pair_through_proxy(&mut sessions, |_| {}).await;
 
     let _subscriber = ztimeout!(subscribing.declare_subscriber(KEY).callback(|_| {})).unwrap();
     let publisher = ztimeout!(publishing
@@ -600,18 +632,168 @@ async fn a_failed_link_reports_its_queued_batches() {
     .unwrap();
     wait_matching(&publisher).await;
 
-    // The proxy stops reading, so the publisher's queue fills until a put is dropped.
+    // The proxy stops reading, so the publisher's queue fills.
     proxy.stalled.store(true, Ordering::SeqCst);
-    put_until(&publisher, subscribing.zid(), PAYLOAD_SIZE, |_| true).await;
+    overfill(&publisher).await;
     proxy.kill();
-    wait_until("the link's queued batches are reported", || {
-        push_drops_to(subscribing.zid()).iter().any(|dropped| {
-            matches!(dropped.reason, PushDropReason::LinkClosedQueued { batches } if batches > 0)
-                && dropped.key_expr.is_none()
-                && dropped.priority == Some(Priority::Data)
-        })
+    wait_queued_loss(
+        subscribing.zid(),
+        |reason| matches!(reason, PushDropReason::LinkResetQueued { batches } if *batches > 0),
+    )
+    .await;
+    assert!(!push_drops_to(subscribing.zid())
+        .iter()
+        .any(|dropped| matches!(dropped.reason, PushDropReason::LinkClosedQueued { .. })));
+
+    sessions.close().await;
+}
+
+/// A link that its publisher closes while the subscriber's connection is open but not read
+/// reports the batches it queued as lost to a reader that is alive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_link_closed_while_its_peer_is_not_reading_reports_its_queued_batches() {
+    zenoh::init_log_from_env_or("error");
+    install_observers();
+    const KEY: &str = "test/drop_observer/unread_link";
+    let mut sessions = TestSessions::new();
+    // A short lease, so that the publisher closes the link soon after the proxy stops
+    // forwarding, and a short keep-alive period, which bounds a write at close.
+    let (publishing, subscribing, proxy) = open_pair_through_proxy(&mut sessions, |config| {
+        config
+            .insert_json5("transport/link/tx/lease", "1000")
+            .unwrap();
     })
     .await;
+
+    let _subscriber = ztimeout!(subscribing.declare_subscriber(KEY).callback(|_| {})).unwrap();
+    let publisher = ztimeout!(publishing
+        .declare_publisher(KEY)
+        .congestion_control(CongestionControl::Drop)
+        .reliability(Reliability::Reliable))
+    .unwrap();
+    wait_matching(&publisher).await;
+
+    proxy.stalled.store(true, Ordering::SeqCst);
+    overfill(&publisher).await;
+    wait_queued_loss(
+        subscribing.zid(),
+        |reason| matches!(reason, PushDropReason::LinkClosedQueued { batches } if *batches > 0),
+    )
+    .await;
+    assert!(!push_drops_to(subscribing.zid())
+        .iter()
+        .any(|dropped| matches!(dropped.reason, PushDropReason::LinkResetQueued { .. })));
+
+    proxy.kill();
+    sessions.close().await;
+}
+
+/// A link that fails while a blocking put waits on it does not hold up the process's other
+/// links: a healthy subscriber of the same publisher keeps receiving, with nothing dropped and
+/// nothing lost. The process's links share one TX thread, which must not wait for that put.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_link_does_not_stall_the_other_links() {
+    zenoh::init_log_from_env_or("error");
+    install_observers();
+    const DATA: &str = "test/drop_observer/stall/data";
+    const BLOCKED: &str = "test/drop_observer/stall/blocked";
+    const FILL: &str = "test/drop_observer/stall/fill";
+    let mut sessions = TestSessions::new();
+    let publishing = sessions.open_listener().await;
+    let healthy = sessions.open_connector().await;
+    let proxy = Proxy::start(&get_tcp_locator(&publishing).await);
+    let stalled = sessions
+        .open_connector_with_cfg(
+            sessions.get_connector_config_with_endpoint(vec![proxy.endpoint.clone()]),
+        )
+        .await;
+
+    let healthy_received = Arc::new(AtomicUsize::new(0));
+    let stalled_received = Arc::new(AtomicUsize::new(0));
+    let _healthy_subscriber = ztimeout!(healthy.declare_subscriber(DATA).callback({
+        let received = healthy_received.clone();
+        move |_| {
+            received.fetch_add(1, Ordering::SeqCst);
+        }
+    }))
+    .unwrap();
+    let _stalled_subscriber = ztimeout!(stalled
+        .declare_subscriber("test/drop_observer/stall/**")
+        .callback({
+            let received = stalled_received.clone();
+            move |_| {
+                received.fetch_add(1, Ordering::SeqCst);
+            }
+        }))
+    .unwrap();
+    let publisher = ztimeout!(publishing
+        .declare_publisher(DATA)
+        .congestion_control(CongestionControl::Drop)
+        .reliability(Reliability::Reliable))
+    .unwrap();
+    // Both subscribers receive before the test begins.
+    let start = Instant::now();
+    while healthy_received.load(Ordering::SeqCst) == 0
+        || stalled_received.load(Ordering::SeqCst) == 0
+    {
+        assert!(start.elapsed() < TIMEOUT, "a subscriber never received");
+        ztimeout!(publisher.put(vec![0_u8; PAYLOAD_SIZE])).unwrap();
+        tokio::time::sleep(POLL).await;
+    }
+
+    // About 1,000 puts a second to both, which the healthy subscriber keeps up with.
+    let streaming = Arc::new(AtomicBool::new(true));
+    let stream = std::thread::spawn({
+        let streaming = streaming.clone();
+        move || {
+            while streaming.load(Ordering::SeqCst) {
+                publisher.put(vec![0_u8; PAYLOAD_SIZE]).wait().unwrap();
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    });
+
+    // The proxy stops reading, the link to the stalled subscriber fills, and a blocking put to
+    // it waits for a batch, holding its queue's lock.
+    proxy.stalled.store(true, Ordering::SeqCst);
+    let filling = ztimeout!(publishing
+        .declare_publisher(FILL)
+        .congestion_control(CongestionControl::Drop)
+        .reliability(Reliability::Reliable))
+    .unwrap();
+    overfill(&filling).await;
+    let blocked = std::thread::spawn({
+        let publishing = publishing.clone();
+        move || {
+            publishing
+                .put(BLOCKED, vec![0_u8; PAYLOAD_SIZE])
+                .congestion_control(CongestionControl::Block)
+                .reliability(Reliability::Reliable)
+                .wait()
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!blocked.is_finished(), "the blocking put did not wait");
+
+    let before = healthy_received.load(Ordering::SeqCst);
+    proxy.kill();
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    let after = healthy_received.load(Ordering::SeqCst);
+    streaming.store(false, Ordering::SeqCst);
+    tokio::task::spawn_blocking(move || {
+        stream.join().unwrap();
+        let _ = blocked.join().unwrap();
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        after > before + 100,
+        "the healthy subscriber received {} in the second after the reset",
+        after - before
+    );
+    assert_eq!(push_drops_to(healthy.zid()), []);
+    assert_eq!(rx_losses_from(publishing.zid()), []);
 
     sessions.close().await;
 }

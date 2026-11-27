@@ -54,7 +54,7 @@ use zenoh_buffers::{
 };
 use zenoh_link::Link;
 use zenoh_protocol::{
-    core::{Priority, ZenohIdProto},
+    core::Priority,
     transport::{KeepAlive, TransportMessage},
 };
 use zenoh_result::{bail, zerror, ZResult};
@@ -186,12 +186,11 @@ impl TransportLinkUnicastUniversal {
         #[cfg(feature = "stats")]
         let stats = self.stats.clone();
         let ct = self.task_controller.get_cancellation_token();
-        let peer = transport.config.zid;
         let task = async move {
             let res = tx_task(
                 consumer,
                 &mut tx,
-                peer,
+                &transport,
                 keep_alive,
                 ct,
                 #[cfg(feature = "stats")]
@@ -276,7 +275,7 @@ impl TransportLinkUnicastUniversal {
 async fn tx_task(
     pipeline: TransmissionPipelineConsumer,
     link: &mut TransportLinkUnicastTx,
-    peer: ZenohIdProto,
+    transport: &TransportUnicastUniversal,
     keep_alive: Duration,
     cancellation_token: CancellationToken,
     #[cfg(feature = "stats")] stats: zenoh_stats::LinkStats,
@@ -287,6 +286,7 @@ async fn tx_task(
             let mut link = link.clone();
             let cancellation_token = cancellation_token.clone();
             let keep_alive_tracker = keep_alive_tracker.clone();
+            let transport = transport.clone();
             #[cfg(feature = "stats")]
             let stats = stats.clone();
             zenoh_runtime::ZRuntime::TX.spawn(async move {
@@ -294,7 +294,7 @@ async fn tx_task(
                     Some(pipeline.priority()),
                     pipeline,
                     &mut link,
-                    peer,
+                    &transport,
                     keep_alive_tracker,
                     cancellation_token,
                     #[cfg(feature = "stats")]
@@ -310,7 +310,7 @@ async fn tx_task(
             None,
             pipeline,
             link,
-            peer,
+            transport,
             keep_alive_tracker,
             cancellation_token,
             #[cfg(feature = "stats")]
@@ -325,13 +325,14 @@ async fn write_loop(
     write_priority: Option<Priority>,
     mut pipeline: impl PipelineConsumer,
     link: &mut TransportLinkUnicastTx,
-    peer: ZenohIdProto,
+    transport: &TransportUnicastUniversal,
     keep_alive_tracker: TimeoutTracker,
     cancellation_token: CancellationToken,
     #[cfg(feature = "stats")] stats: zenoh_stats::LinkStats,
 ) -> ZResult<()> {
-    // The priority of the batch whose write failed.
-    let mut failed = None;
+    // The priority of the batch being written, which is lost if its write fails or is
+    // cancelled (BER-2554).
+    let mut writing = None;
     let task = async {
         loop {
             tokio::select! {
@@ -341,10 +342,9 @@ async fn write_loop(
                         break
                     };
                     debug_assert!(write_priority.is_none() || write_priority == Some(priority));
-                    if let Err(e) = link.send_batch(&mut batch, write_priority).await {
-                        failed = Some(priority);
-                        return Err(e);
-                    }
+                    writing = Some(priority);
+                    link.send_batch(&mut batch, write_priority).await?;
+                    writing = None;
                     // inform the latest message tracker that a message has been sent
                     keep_alive_tracker.reset();
 
@@ -379,9 +379,12 @@ async fn write_loop(
     if let Some(Err(e)) = outcome {
         // Nothing more is pushed to a link that cannot write, and what it held is lost.
         pipeline.disable();
-        report_unsent(peer, failed.into_iter().chain(unsent(pipeline.drain())));
+        let unsent = writing.into_iter().chain(unsent(pipeline.drain()));
+        report_unsent(transport, link, Unwritten::WriteFailed, unsent);
         return Err(e);
     }
+    // A batch whose write the close cut short is lost too.
+    let cut = writing;
 
     // Drain the transmission pipeline and write remaining bytes on the wire
     let mut batches = pipeline.drain().into_iter();
@@ -390,17 +393,24 @@ async fn write_loop(
             keep_alive_tracker.timeout(),
             link.send_batch(&mut b, write_priority),
         )
-        .await
-        .map_err(|_| {
-            zerror!(
-                "{link}: flush failed after {} ms",
-                keep_alive_tracker.timeout().as_millis()
-            )
-            .into()
-        })
-        .and_then(|sent| sent);
-        if let Err(e) = flushed {
-            report_unsent(peer, unsent(std::iter::once((b, priority)).chain(batches)));
+        .await;
+        let unwritten = match flushed {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => Some((Unwritten::WriteFailed, e)),
+            Err(_) => Some((
+                Unwritten::NotRead,
+                zerror!(
+                    "{link}: flush failed after {} ms",
+                    keep_alive_tracker.timeout().as_millis()
+                )
+                .into(),
+            )),
+        };
+        if let Some((unwritten, e)) = unwritten {
+            let unsent = cut
+                .into_iter()
+                .chain(unsent(std::iter::once((b, priority)).chain(batches)));
+            report_unsent(transport, link, unwritten, unsent);
             return Err(e);
         }
 
@@ -410,6 +420,7 @@ async fn write_loop(
             stats.inc_transport_message(zenoh_stats::Tx, b.stats.t_msgs as u64);
         }
     }
+    report_unsent(transport, link, Unwritten::NotRead, cut);
 
     Ok(())
 }
@@ -424,16 +435,45 @@ fn unsent(
         .map(|(_, priority)| priority)
 }
 
-/// Reports, per priority, the batches a link holds and will not write (BER-2554).
-fn report_unsent(peer: ZenohIdProto, priorities: impl IntoIterator<Item = Priority>) {
+/// Why a link did not write batches it held.
+#[derive(Clone, Copy)]
+enum Unwritten {
+    /// A write failed: the connection was closed or reset at the peer's end.
+    WriteFailed,
+    /// The link closed at this end while its peer was not reading: a write at close found no
+    /// room before the keep-alive timeout, or was cut short by the close.
+    NotRead,
+}
+
+/// Reports, per priority, the batches a link holds and will not write (BER-2554). A reader
+/// that is alive loses them when its connection was open and not reading, or when it stays
+/// reachable on another link of the transport.
+fn report_unsent(
+    transport: &TransportUnicastUniversal,
+    link: &TransportLinkUnicastTx,
+    unwritten: Unwritten,
+    priorities: impl IntoIterator<Item = Priority>,
+) {
     let mut batches = [0_usize; Priority::NUM];
     for priority in priorities {
         batches[priority as usize] += 1;
     }
+    if batches.iter().all(|batches| *batches == 0) {
+        return;
+    }
+    let reader_alive = match unwritten {
+        Unwritten::NotRead => true,
+        Unwritten::WriteFailed => transport.has_link_other_than(&link.inner.link),
+    };
     for (priority, batches) in batches.into_iter().enumerate() {
         if batches > 0 {
             let priority = Priority::try_from(priority as u8).unwrap();
-            loss::report_tx(peer, priority, TxLossKind::Unsent { batches });
+            let kind = if reader_alive {
+                TxLossKind::ClosedQueued { batches }
+            } else {
+                TxLossKind::ResetQueued { batches }
+            };
+            loss::report_tx(transport.config.zid, priority, kind);
         }
     }
 }

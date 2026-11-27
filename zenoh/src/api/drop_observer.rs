@@ -37,7 +37,8 @@ pub struct PushDrop<'a> {
     pub zid: ZenohId,
     /// The push's key expression. `None` when the face no longer maps its wire expression,
     /// and for a loss the transport reports after it accepted the push, where only the wire
-    /// expression is known: [`PushDropReason::LinkClosedQueued`] and a `BlockFirst` push.
+    /// expression is known: [`PushDropReason::LinkClosedQueued`],
+    /// [`PushDropReason::LinkResetQueued`] and a `BlockFirst` push.
     pub key_expr: Option<&'a str>,
     /// The push's priority, or `None` for zenoh's own control priority.
     pub priority: Option<Priority>,
@@ -51,16 +52,25 @@ pub struct PushDrop<'a> {
 pub enum PushDropReason {
     /// The transport discarded it: no batch of its priority's queue came free before the drop
     /// deadline (for a blocking push, before `wait_before_close`, and the transport then
-    /// closes), a `BlockFirst` push waited out its turn, or the push does not fit the link's
-    /// batches even as fragments.
+    /// closes), a `BlockFirst` push waited out its turn, the push does not fit the link's
+    /// batches even as fragments, or the link it went to had failed while the transport kept
+    /// another link to the peer.
     Dropped,
     /// The transport had closed or begun to close, or had lost its last link, which it loses
-    /// only as it closes.
+    /// only as it closes. This is not a drop: there is no reader left on that transport.
     TransportClosed,
-    /// The link failed, or could not flush at close, with `batches` batches of the push's
-    /// priority queued or being written: every message in them is lost. Batches already
+    /// A reader that is alive lost `batches` batches of the push's priority, queued or being
+    /// written: the link closed at this end while its peer was not reading (a write at close
+    /// found no room before the keep-alive timeout, or was cut short by the close), or its
+    /// write failed while the transport kept another link to the peer. Batches already
     /// written to the socket are not counted.
     LinkClosedQueued { batches: usize },
+    /// The link's connection was closed or reset at the peer's end, with `batches` batches of
+    /// the push's priority queued or being written, and the transport had no other link to
+    /// the peer. This is what a peer whose process ends gives, and its reader, gone with it,
+    /// loses nothing it would have read. A peer whose zenoh closes the link while its process
+    /// lives gives it too, and then its application has lost these messages.
+    LinkResetQueued { batches: usize },
 }
 
 impl PushDropReason {
@@ -75,7 +85,8 @@ impl PushDropReason {
 
     fn of_tx_loss(kind: TxLossKind) -> Self {
         match kind {
-            TxLossKind::Unsent { batches } => Self::LinkClosedQueued { batches },
+            TxLossKind::ClosedQueued { batches } => Self::LinkClosedQueued { batches },
+            TxLossKind::ResetQueued { batches } => Self::LinkResetQueued { batches },
             TxLossKind::BlockFirstDropped => Self::Dropped,
             TxLossKind::BlockFirstClosed => Self::TransportClosed,
         }

@@ -72,13 +72,25 @@ yet at the commit that introduced the table.
   query waited out its timeout there.
 * **A dropped message is reported to the sender and to the receiver** (BER-2554), through
   `zenoh::drop_observer`, under `unstable`.
-  * **Sender.** A push a face's transport does not queue reaches the sending process's push
+  * **Sender.** A push a face's transport does not deliver reaches the sending process's push
     drop observer, with the face's ZenohId, the key expression, the priority and a reason:
-    `Dropped` for a discard (congestion, a `BlockFirst` push that waited out its turn or then
-    found no batch, a push that does not fit the link's batches even as fragments),
-    `TransportClosed` for a transport that had closed or lost its last link, and
-    `LinkClosedQueued { batches }` for the batches a link held when its write failed or its
-    flush at close did. A link whose write fails refuses every later push at once.
+    * `Dropped` for a discard: congestion, a `BlockFirst` push that waited out its turn or
+      then found no batch, a push that does not fit the link's batches even as fragments, and
+      a push a failed link refuses while its transport keeps another link to the peer;
+    * `TransportClosed` for a transport that had closed or lost its last link, which is not a
+      drop;
+    * `LinkClosedQueued { batches }` for batches a reader that is alive lost: the link closed
+      at this end while its peer was not reading (a write at close found no room before the
+      keep-alive timeout, or was cut short by the close), or its write failed while the
+      transport kept another link to the peer;
+    * `LinkResetQueued { batches }` for batches a link held when its connection was closed or
+      reset at the peer's end with no other link to it, which is what a peer whose process
+      ends gives. A peer whose zenoh closes the link while its process lives gives it too.
+
+    A link whose write fails refuses every later push at once. The TX task that drains a link
+    never waits for a push's lock: it takes the batch a push is filling only if no push holds
+    it, so a push waiting for a batch cannot hold up the process's single TX thread, and is
+    released when the link's tasks end.
   * **Receiver.** A sender that drops a message leaves one frame SN unused at its next frame
     on that priority and reliability, so the receiver sees a gap of 2, and the receiving
     process's rx loss observer reports it with the peer's ZenohId. It also reports the
@@ -87,25 +99,32 @@ yet at the commit that introduced the table.
   * **Upstream SN slips that would read as gaps, fixed:** the first frame after a transport
     opens read as a gap of 2 when the peer's initial SN was 0; every fragmented message took
     an SN after its last fragment, so the frame after it read as a gap; a fragmented message
-    abandoned part way left its stop fragment's SN unused (a stop fragment has no payload, so
-    it never encodes, and none is queued now); and the "can not be fragmented" path rewound the
-    SN below the fragments it had sent, and reported the message sent.
-  * **Queue.** A link's queue takes up to 64 batches per priority, still allocated lazily;
-    its ring holds twice that. A size outside 1..=64 set on its own, which the config's
-    validator does not see, fails the transport manager's build, so the session does not open.
+    abandoned part way left the SN of its stop fragment unused (a stop fragment has no
+    payload, so it never encoded, and the pipeline no longer builds one); and the "can not be
+    fragmented" path rewound the SN below the fragments it had sent, and reported the message
+    sent.
+  * **Queue.** A link's queue takes up to 64 batches per priority, still allocated lazily.
+    Only a stage's own batches enter its rings, so a ring the length of the cap cannot
+    overflow. A size outside 1..=64 set on its own, which the config's validator does not
+    see, fails the transport manager's build, so the session does not open.
+  * **Two links in one transport.** Two peers that open to each other at once can end up with
+    two links in one transport, even at `max_links` 1, since upstream counts only inbound
+    links against it. A link that fails beside another reports what it held as
+    `LinkClosedQueued`, and the receiver sees the gap on the other link.
   * **Observers** are installed once per process and must neither block nor panic; a panic is
-    caught after the panic hook has reported it.
+    caught after the panic hook has reported it, so an observer that must stop the process
+    exits or aborts.
   * **Not covered.** The sender's observer sees pushes only, not requests or replies. A push
     an interceptor refuses reaches neither observer. The multicast receive path reports
     nothing, and a multicast face's push drops carry zenoh's placeholder ZenohId. A drop the
     sender never follows with a frame on that channel never reaches the receiver, nor does a
     message lost with a failed link, since the new transport starts its SNs afresh. Not
-    counted in `LinkClosedQueued`: batches already written to the socket, and a push already
-    under way in the instant the link fails or closes. A sender without these
-    fixes, upstream's included, leaves a gap after every fragmented message it sends. Upstream
-    defect, not fixed: on a transport without QoS the congested bit is set on
-    `Priority::DEFAULT` and cleared on bit 0, so after its first congestion drop every later
-    droppable push on it is dropped.
+    counted in `LinkClosedQueued` or `LinkResetQueued`: batches already written to the
+    socket, and, in the instant the link fails or closes, a push under way and the batch a
+    push is filling. A sender without these fixes, upstream's included, leaves a gap after
+    every fragmented message it sends. Upstream defect, not fixed: on a transport without QoS
+    the congested bit is set on `Priority::DEFAULT` and cleared on bit 0, so after its first
+    congestion drop every later droppable push on it is dropped.
 * **One upstream fix carried**, [#2862](https://github.com/eclipse-zenoh/zenoh/pull/2862),
   under two criteria: it has a test that fails here, and it is reachable by what we run. That
   PR is OPEN and unreviewed upstream -- it is not accepted code.

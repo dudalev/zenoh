@@ -865,9 +865,13 @@ pub mod qos {
 ///
 /// The receiver hears of a drop only when the sender next sends a frame on the same priority
 /// and reliability, and the drops between two frames make one gap of 2, however many messages
-/// they cover. Messages lost with a link that fails reach only the sender's observer, as
-/// [`PushDropReason::LinkClosedQueued`](drop_observer::PushDropReason::LinkClosedQueued): the
-/// transport that replaces the link starts its SNs afresh. A transport that closes is
+/// they cover. Messages lost with a link that fails reach only the sender's observer: the
+/// transport that replaces the link starts its SNs afresh. They are
+/// [`PushDropReason::LinkClosedQueued`](drop_observer::PushDropReason::LinkClosedQueued) when
+/// a reader that is alive lost them, and
+/// [`PushDropReason::LinkResetQueued`](drop_observer::PushDropReason::LinkResetQueued) when the
+/// connection was closed or reset at the peer's end, as a peer whose process ends gives. A
+/// transport that closes is
 /// [`PushDropReason::TransportClosed`](drop_observer::PushDropReason::TransportClosed), which
 /// is not a drop. Only unicast transports report receive-side losses. Observers must neither
 /// block nor panic; a panic is caught after the panic hook has reported it.
