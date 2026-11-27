@@ -856,7 +856,8 @@ pub mod qos {
 /// A push dropped for congestion reaches two observers, one in each process:
 ///
 /// * the sender's [`set_push_drop_observer`](drop_observer::set_push_drop_observer), called
-///   for each face whose transport did not queue the push;
+///   for each face whose transport did not deliver the push, with
+///   [`PushDropReason::Dropped`](drop_observer::PushDropReason::Dropped);
 /// * the receiver's [`set_rx_loss_observer`](drop_observer::set_rx_loss_observer), called with
 ///   [`RxLossKind::SnGap`](drop_observer::RxLossKind::SnGap) when the next frame on that channel
 ///   arrives. The sender leaves one frame SN unused after a drop, and that is the whole of the
@@ -864,7 +865,12 @@ pub mod qos {
 ///
 /// The receiver hears of a drop only when the sender next sends a frame on the same priority
 /// and reliability, and the drops between two frames make one gap of 2, however many messages
-/// they cover. Only unicast transports report receive-side losses.
+/// they cover. Messages lost with a link that fails reach only the sender's observer, as
+/// [`PushDropReason::LinkClosedQueued`](drop_observer::PushDropReason::LinkClosedQueued): the
+/// transport that replaces the link starts its SNs afresh. A transport that closes is
+/// [`PushDropReason::TransportClosed`](drop_observer::PushDropReason::TransportClosed), which
+/// is not a drop. Only unicast transports report receive-side losses. Observers must neither
+/// block nor panic; a panic is caught after the panic hook has reported it.
 #[zenoh_macros::unstable]
 pub mod drop_observer {
     pub use zenoh_transport::common::loss::RxLossKind;

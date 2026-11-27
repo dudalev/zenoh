@@ -13,7 +13,7 @@
 //
 use zenoh_core::zread;
 use zenoh_protocol::network::{NetworkMessageExt, NetworkMessageMut, NetworkMessageRef};
-use zenoh_result::ZResult;
+use zenoh_result::{bail, ZResult};
 
 use super::transport::TransportMulticastInner;
 #[cfg(feature = "shared-memory")]
@@ -36,6 +36,8 @@ impl TransportMulticastInner {
                     "Message dropped because the transport has no links: {}",
                     msg
                 );
+                // A multicast transport loses its link only as it closes (BER-2554).
+                bail!("Multicast transport: no link");
             }
         }
 

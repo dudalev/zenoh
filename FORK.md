@@ -71,21 +71,41 @@ yet at the commit that introduced the table.
   in the routes of a peer that had not yet had its answer to the initial interest, so the next
   query waited out its timeout there.
 * **A dropped message is reported to the sender and to the receiver** (BER-2554), through
-  `zenoh::drop_observer`, under `unstable`. A push a face's transport does not queue reaches
-  the sending process's push drop observer, with the face's ZenohId, the key expression, the
-  priority and whether the transport discarded it or had closed. A sender that drops a message
-  leaves one frame SN unused at its next frame on that priority and reliability, so the
-  receiver sees a gap, and the receiving process's rx loss observer reports it with the peer's
-  ZenohId; it also reports the fragments a unicast receive path discards. The wire protocol is
-  unchanged: a receiver that does not report gaps accepts one, as upstream's does. Two
-  upstream SN slips that would read as gaps are fixed: the first frame after a transport opens
-  read as a gap of 2 when the peer's initial SN was 0, and a fragmented message abandoned part
-  way left its stop fragment's SN unused, because a stop fragment has no payload and so never
-  encodes. A link's queue takes up to 64 batches per priority, still allocated lazily. Not
-  covered: the sender's observer sees pushes only, not requests or replies; a push an
-  interceptor refuses reaches neither observer; the multicast receive path reports nothing; a
-  drop the sender never follows with a frame on that channel never reaches the receiver; and
-  a drop for want of a link leaves no pipeline to carry the gap.
+  `zenoh::drop_observer`, under `unstable`.
+  * **Sender.** A push a face's transport does not queue reaches the sending process's push
+    drop observer, with the face's ZenohId, the key expression, the priority and a reason:
+    `Dropped` for a discard (congestion, a `BlockFirst` push that waited out its turn or then
+    found no batch, a push that does not fit the link's batches even as fragments),
+    `TransportClosed` for a transport that had closed or lost its last link, and
+    `LinkClosedQueued { batches }` for the batches a link held when its write failed or its
+    flush at close did. A link whose write fails refuses every later push at once.
+  * **Receiver.** A sender that drops a message leaves one frame SN unused at its next frame
+    on that priority and reliability, so the receiver sees a gap of 2, and the receiving
+    process's rx loss observer reports it with the peer's ZenohId. It also reports the
+    fragments a unicast receive path discards. The wire protocol is unchanged: a receiver that
+    does not report gaps accepts one, as upstream's does.
+  * **Upstream SN slips that would read as gaps, fixed:** the first frame after a transport
+    opens read as a gap of 2 when the peer's initial SN was 0; every fragmented message took
+    an SN after its last fragment, so the frame after it read as a gap; a fragmented message
+    abandoned part way left its stop fragment's SN unused (a stop fragment has no payload, so
+    it never encodes, and none is queued now); and the "can not be fragmented" path rewound the
+    SN below the fragments it had sent, and reported the message sent.
+  * **Queue.** A link's queue takes up to 64 batches per priority, still allocated lazily;
+    its ring holds twice that. A size outside 1..=64 set on its own, which the config's
+    validator does not see, fails the transport manager's build, so the session does not open.
+  * **Observers** are installed once per process and must neither block nor panic; a panic is
+    caught after the panic hook has reported it.
+  * **Not covered.** The sender's observer sees pushes only, not requests or replies. A push
+    an interceptor refuses reaches neither observer. The multicast receive path reports
+    nothing, and a multicast face's push drops carry zenoh's placeholder ZenohId. A drop the
+    sender never follows with a frame on that channel never reaches the receiver, nor does a
+    message lost with a failed link, since the new transport starts its SNs afresh. Not
+    counted in `LinkClosedQueued`: batches already written to the socket, and a push already
+    under way in the instant the link fails or closes. A sender without these
+    fixes, upstream's included, leaves a gap after every fragmented message it sends. Upstream
+    defect, not fixed: on a transport without QoS the congested bit is set on
+    `Priority::DEFAULT` and cleared on bit 0, so after its first congestion drop every later
+    droppable push on it is dropped.
 * **One upstream fix carried**, [#2862](https://github.com/eclipse-zenoh/zenoh/pull/2862),
   under two criteria: it has a test that fails here, and it is reachable by what we run. That
   PR is OPEN and unreviewed upstream -- it is not accepted code.

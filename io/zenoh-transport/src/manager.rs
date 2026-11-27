@@ -485,6 +485,28 @@ impl TransportManagerBuilder {
         handler: Arc<dyn TransportEventHandler>,
         #[cfg(feature = "stats")] stats: zenoh_stats::StatsRegistry,
     ) -> ZResult<TransportManager> {
+        // The config's validator does not see a size set on its own, so each is checked here,
+        // before any link opens (BER-2554).
+        let sizes = &self.queue_size;
+        for size in [
+            sizes.control(),
+            sizes.real_time(),
+            sizes.interactive_high(),
+            sizes.interactive_low(),
+            sizes.data_high(),
+            sizes.data(),
+            sizes.data_low(),
+            sizes.background(),
+        ] {
+            if !(QueueSizeConf::MIN..=QueueSizeConf::MAX).contains(size) {
+                bail!(
+                    "transport/link/tx/queue/size: {size} batches is outside {}..={}",
+                    QueueSizeConf::MIN,
+                    QueueSizeConf::MAX
+                );
+            }
+        }
+
         // Initialize the PRNG and the Cipher
         let mut prng = PseudoRng::from_entropy();
 

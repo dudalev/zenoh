@@ -54,7 +54,7 @@ use zenoh_buffers::{
 };
 use zenoh_link::Link;
 use zenoh_protocol::{
-    core::Priority,
+    core::{Priority, ZenohIdProto},
     transport::{KeepAlive, TransportMessage},
 };
 use zenoh_result::{bail, zerror, ZResult};
@@ -81,7 +81,8 @@ use zenoh_uring::api::reader::{
 use super::transport::TransportUnicastUniversal;
 use crate::{
     common::{
-        batch::{BatchConfig, RBatch},
+        batch::{BatchConfig, RBatch, WBatch},
+        loss::{self, TxLossKind},
         pipeline::{
             PipelineConsumer, TransmissionPipeline, TransmissionPipelineConf,
             TransmissionPipelineConsumer, TransmissionPipelineProducer,
@@ -185,10 +186,12 @@ impl TransportLinkUnicastUniversal {
         #[cfg(feature = "stats")]
         let stats = self.stats.clone();
         let ct = self.task_controller.get_cancellation_token();
+        let peer = transport.config.zid;
         let task = async move {
             let res = tx_task(
                 consumer,
                 &mut tx,
+                peer,
                 keep_alive,
                 ct,
                 #[cfg(feature = "stats")]
@@ -273,6 +276,7 @@ impl TransportLinkUnicastUniversal {
 async fn tx_task(
     pipeline: TransmissionPipelineConsumer,
     link: &mut TransportLinkUnicastTx,
+    peer: ZenohIdProto,
     keep_alive: Duration,
     cancellation_token: CancellationToken,
     #[cfg(feature = "stats")] stats: zenoh_stats::LinkStats,
@@ -290,6 +294,7 @@ async fn tx_task(
                     Some(pipeline.priority()),
                     pipeline,
                     &mut link,
+                    peer,
                     keep_alive_tracker,
                     cancellation_token,
                     #[cfg(feature = "stats")]
@@ -305,6 +310,7 @@ async fn tx_task(
             None,
             pipeline,
             link,
+            peer,
             keep_alive_tracker,
             cancellation_token,
             #[cfg(feature = "stats")]
@@ -319,10 +325,13 @@ async fn write_loop(
     write_priority: Option<Priority>,
     mut pipeline: impl PipelineConsumer,
     link: &mut TransportLinkUnicastTx,
+    peer: ZenohIdProto,
     keep_alive_tracker: TimeoutTracker,
     cancellation_token: CancellationToken,
     #[cfg(feature = "stats")] stats: zenoh_stats::LinkStats,
 ) -> ZResult<()> {
+    // The priority of the batch whose write failed.
+    let mut failed = None;
     let task = async {
         loop {
             tokio::select! {
@@ -332,7 +341,10 @@ async fn write_loop(
                         break
                     };
                     debug_assert!(write_priority.is_none() || write_priority == Some(priority));
-                    link.send_batch(&mut batch, write_priority).await?;
+                    if let Err(e) = link.send_batch(&mut batch, write_priority).await {
+                        failed = Some(priority);
+                        return Err(e);
+                    }
                     // inform the latest message tracker that a message has been sent
                     keep_alive_tracker.reset();
 
@@ -363,14 +375,18 @@ async fn write_loop(
         }
         ZResult::Ok(())
     };
-    if let Some(result) = cancellation_token.run_until_cancelled(task).await {
-        result?;
+    let outcome = cancellation_token.run_until_cancelled(task).await;
+    if let Some(Err(e)) = outcome {
+        // Nothing more is pushed to a link that cannot write, and what it held is lost.
+        pipeline.disable();
+        report_unsent(peer, failed.into_iter().chain(unsent(pipeline.drain())));
+        return Err(e);
     }
 
     // Drain the transmission pipeline and write remaining bytes on the wire
-    let mut batches = pipeline.drain();
-    for (mut b, _) in batches.drain(..) {
-        tokio::time::timeout(
+    let mut batches = pipeline.drain().into_iter();
+    while let Some((mut b, priority)) = batches.next() {
+        let flushed = tokio::time::timeout(
             keep_alive_tracker.timeout(),
             link.send_batch(&mut b, write_priority),
         )
@@ -380,7 +396,13 @@ async fn write_loop(
                 "{link}: flush failed after {} ms",
                 keep_alive_tracker.timeout().as_millis()
             )
-        })??;
+            .into()
+        })
+        .and_then(|sent| sent);
+        if let Err(e) = flushed {
+            report_unsent(peer, unsent(std::iter::once((b, priority)).chain(batches)));
+            return Err(e);
+        }
 
         #[cfg(feature = "stats")]
         {
@@ -390,6 +412,30 @@ async fn write_loop(
     }
 
     Ok(())
+}
+
+/// The priorities of the batches among `batches` that hold messages.
+fn unsent(
+    batches: impl IntoIterator<Item = (Box<WBatch>, Priority)>,
+) -> impl Iterator<Item = Priority> {
+    batches
+        .into_iter()
+        .filter(|(batch, _)| !batch.is_empty())
+        .map(|(_, priority)| priority)
+}
+
+/// Reports, per priority, the batches a link holds and will not write (BER-2554).
+fn report_unsent(peer: ZenohIdProto, priorities: impl IntoIterator<Item = Priority>) {
+    let mut batches = [0_usize; Priority::NUM];
+    for priority in priorities {
+        batches[priority as usize] += 1;
+    }
+    for (priority, batches) in batches.into_iter().enumerate() {
+        if batches > 0 {
+            let priority = Priority::try_from(priority as u8).unwrap();
+            loss::report_tx(peer, priority, TxLossKind::Unsent { batches });
+        }
+    }
 }
 
 async fn rx_task(

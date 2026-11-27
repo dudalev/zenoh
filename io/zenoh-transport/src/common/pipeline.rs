@@ -53,7 +53,9 @@ use crate::common::batch::BatchConfig;
 // the moves. They are always reused, so there is no allocation performance penalty.
 type BoxedWBatch = Box<WBatch>;
 
-const RBLEN: usize = QueueSizeConf::MAX;
+// Twice the queue cap, so that the ring has room beside a full queue for ephemeral batches,
+// which are not counted against the cap (BER-2554).
+const RBLEN: usize = 2 * QueueSizeConf::MAX;
 
 // Inner structure to reuse serialization batches
 struct StageInRefill {
@@ -128,7 +130,10 @@ impl StageInOut {
 
     #[inline]
     fn move_batch(&mut self, batch: BoxedWBatch) {
-        let _ = self.s_out_w.push(batch);
+        assert!(
+            self.s_out_w.push(batch).is_none(),
+            "a batch found the out ring full"
+        );
         self.atomic_backoff.bytes.store(0, Ordering::Relaxed);
         let _ = self.n_out_w.notify();
     }
@@ -278,6 +283,16 @@ impl Deadline {
     }
 }
 
+// What became of a message given to the initial stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pushed {
+    Queued,
+    // No batch came free before the deadline.
+    NoBatch,
+    // The message does not fit this pipeline's batches even as fragments (BER-2554).
+    Unfragmentable,
+}
+
 // This is the initial stage of the pipeline where messages are serliazed on
 struct StageIn {
     s_ref: StageInRefill,
@@ -295,7 +310,7 @@ impl StageIn {
         msg: NetworkMessageRef,
         priority: Priority,
         deadline: &mut Deadline,
-    ) -> Result<bool, TransportClosed> {
+    ) -> Result<Pushed, TransportClosed> {
         // Lock the current serialization batch.
         let mut c_guard = zlock!(self.mutex.current);
         c_guard.notify_pending();
@@ -324,7 +339,7 @@ impl StageIn {
                                         "Zenoh message dropped because it's over the deadline {:?}: {:?}",
                                         deadline.lazy_deadline.wait_time, msg
                                     );
-                                    return Ok(false);
+                                    return Ok(Pushed::NoBatch);
                                 }
                             }
                         },
@@ -338,13 +353,13 @@ impl StageIn {
                 if !self.batching || $msg.is_express() {
                     // Move out existing batch
                     self.s_out.move_batch($batch);
-                    return Ok(true);
+                    return Ok(Pushed::Queued);
                 } else {
                     let bytes = $batch.len();
                     c_guard.batch = Some($batch);
                     drop(c_guard);
                     self.s_out.notify(bytes);
-                    return Ok(true);
+                    return Ok(Pushed::Queued);
                 }
             }};
         }
@@ -441,15 +456,16 @@ impl StageIn {
                     let mut batch = Box::new(WBatch::new_ephemeral(self.batch_config));
                     self.fragbuf.clear();
                     fragment.ext_drop = Some(fragment::ext::Drop::new());
-                    let encoded = batch
-                        .encode((&mut self.fragbuf.reader(), &mut fragment))
-                        .is_ok();
-                    self.s_out.move_batch(batch);
                     // A stop fragment has no payload, and a fragment with none does not
-                    // encode. Its SN is given back, so that a gap at the receiver means a
-                    // message was lost, and not one that was then sent again in full
+                    // encode. Its SN is then given back, so that a gap at the receiver means
+                    // a message was lost, and not one that was then sent again in full
                     // (BER-2554).
-                    if !encoded {
+                    if batch
+                        .encode((&mut self.fragbuf.reader(), &mut fragment))
+                        .is_ok()
+                    {
+                        self.s_out.move_batch(batch);
+                    } else {
                         tch.sn.set(fragment.sn).unwrap();
                     }
                 }
@@ -458,29 +474,33 @@ impl StageIn {
             // Serialize the message fragment
             match batch.encode((&mut reader, &mut fragment)) {
                 Ok(_) => {
-                    // Update the SN
-                    fragment.sn = tch.sn.get();
+                    // Reserve the next fragment's SN, if one follows: an SN reserved after the
+                    // last fragment would go unused and read as a gap (BER-2554).
+                    if reader.can_read() {
+                        fragment.sn = tch.sn.get();
+                    }
                     fragment.ext_first = None;
                     // Move the serialization batch into the OUT pipeline
                     self.s_out.move_batch(batch);
                 }
                 Err(_) => {
-                    // With no fragment sent, the SNs are given back and one is left unused
-                    // for the drop. With fragments sent, the SN reserved for the next one is
-                    // left unused: going back below the sent ones would have the receiver
-                    // drop the next frames as old. Either way the receiver sees a gap
-                    // (BER-2554).
+                    // With no fragment sent, the SNs taken are given back. With fragments
+                    // sent, only the SN reserved for the next one is: going back below the
+                    // sent ones would have the receiver drop the next frames as old. The
+                    // drop itself leaves an SN unused at the next frame (BER-2554).
                     if fragment.ext_first.is_some() {
-                        tch.sn.set(restore_sn).unwrap();
-                        c_guard.status.arm_skip(c_guard.prioflag, msg.is_reliable());
+                        restore_sn!();
+                    } else {
+                        tch.sn.set(fragment.sn).unwrap();
                     }
                     // Reinsert the batch
                     c_guard.batch = Some(batch);
+                    self.fragbuf.clear();
                     tracing::warn!(
                         "Zenoh message dropped because it can not be fragmented: {:?}",
                         msg
                     );
-                    break;
+                    return Ok(Pushed::Unfragmentable);
                 }
             }
 
@@ -491,7 +511,7 @@ impl StageIn {
         // Clean the fragbuf
         self.fragbuf.clear();
 
-        Ok(true)
+        Ok(Pushed::Queued)
     }
 
     #[inline]
@@ -756,7 +776,7 @@ impl TransmissionPipeline {
         let (n_out_w, n_out_r) = event::new();
 
         for (prio, num) in size_iter.enumerate() {
-            assert!(*num != 0 && *num <= RBLEN);
+            assert!(*num != 0 && *num <= QueueSizeConf::MAX);
 
             // Create the refill ring buffer
             // This is a SPSC ring buffer
@@ -967,19 +987,19 @@ impl TransmissionPipelineProducer {
             self.status.arm_skip(prioflag, msg.is_reliable());
             return Ok(false);
         }
-        let mut sent = queue.push_network_message(msg, priority, &mut deadline)?;
-        // If the message cannot be sent, mark the pipeline as congested.
-        if !sent {
+        let mut pushed = queue.push_network_message(msg, priority, &mut deadline)?;
+        // If the message cannot be sent for want of a batch, mark the pipeline as congested.
+        if pushed == Pushed::NoBatch {
             self.status.set_congested(priority, true);
             // During the time between deadline wakeup and setting the congested flag,
             // all batches could have been refilled (especially if there is a single one),
             // so try again with the same already expired deadline.
-            sent = queue.push_network_message(msg, priority, &mut deadline)?;
+            pushed = queue.push_network_message(msg, priority, &mut deadline)?;
             // If the message is sent in the end, reset the status.
             // Setting the status to `true` is only done with the stage_in mutex acquired,
             // so it is not possible that further messages see the congestion flag set
             // after this point.
-            if sent {
+            if pushed == Pushed::Queued {
                 self.status.set_congested(priority, false);
             }
             // There is one edge case that is fortunately supported: if the message that
@@ -989,6 +1009,7 @@ impl TransmissionPipelineProducer {
             // that means that they would have still been pushed, so we can expect them to
             // be refilled, and they will eventually unset the congested flag.
         }
+        let sent = pushed == Pushed::Queued;
         if !sent {
             self.status.arm_skip(prioflag, msg.is_reliable());
         }
@@ -1063,6 +1084,10 @@ pub(crate) struct TransmissionPipelineConsumer {
 pub(crate) trait PipelineConsumer {
     #[allow(private_interfaces)]
     fn status(&self) -> &TransmissionPipelineStatus;
+    // Refuses every later push, for a link that can no longer write what is pushed (BER-2554).
+    fn disable(&self) {
+        self.status().set_disabled(true);
+    }
     fn stage_pull(&mut self) -> Result<(BoxedWBatch, Priority), Option<MicroSeconds>>;
     fn n_out_r(&self) -> &Waiter;
     async fn pull(&mut self) -> Option<(BoxedWBatch, Priority)> {
@@ -1769,7 +1794,7 @@ mod tests {
             Priority::DEFAULT,
             &mut deadline,
         )?;
-        assert!(!sent);
+        assert_eq!(sent, Pushed::NoBatch);
         assert_eq!(
             zlock!(tct.reliable).sn.now(),
             1,
@@ -1790,21 +1815,77 @@ mod tests {
         Ok(())
     }
 
-    /// A fragmented message abandoned part way, and then sent again in full, starts again at
-    /// the SN after its last fragment sent: the stop fragment does not encode, and gives its
-    /// SN back, so the receiver sees no gap for a message it receives (BER-2554).
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn tx_pipeline_abandoned_fragments_leave_no_gap() -> ZResult<()> {
+    /// A pipeline of `queue` batches of 512 bytes per priority, with QoS.
+    fn small_batches(
+        queue: usize,
+    ) -> ZResult<(TransmissionPipelineProducer, TransmissionPipelineConsumer)> {
         let config = TransmissionPipelineConf {
             batch: BatchConfig {
                 mtu: 512,
                 ..CONFIG_NOT_STREAMED.batch
             },
-            queue_size: [4; Priority::NUM],
+            queue_size: [queue; Priority::NUM],
             ..CONFIG_NOT_STREAMED
         };
-        let (producer, mut consumer) =
-            TransmissionPipeline::make(config, &qos_priorities()?, false);
+        Ok(TransmissionPipeline::make(
+            config,
+            &qos_priorities()?,
+            false,
+        ))
+    }
+
+    /// Pulls `n` batches, refills them, and returns the SN of the first frame or fragment of
+    /// each.
+    async fn pull_sns(consumer: &mut TransmissionPipelineConsumer, n: usize) -> Vec<TransportSn> {
+        let mut sns = vec![];
+        for _ in 0..n {
+            let (batch, priority) = timeout(TIMEOUT, consumer.pull()).await.unwrap().unwrap();
+            sns.push(first_sn(&batch));
+            consumer.refill(batch, priority);
+        }
+        sns
+    }
+
+    /// A fragmented message sent in full takes one SN per fragment and no more, so the frame
+    /// after it follows its last fragment with no gap (BER-2554).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tx_pipeline_fragmented_message_leaves_no_gap() -> ZResult<()> {
+        let (producer, mut consumer) = small_batches(4)?;
+        let small = droppable(Priority::DEFAULT, Reliability::Reliable, true, 8);
+        let large = droppable(Priority::DEFAULT, Reliability::Reliable, true, 1024);
+
+        assert_eq!(send(&producer, &mut consumer, &small).await, 0);
+        assert!(push(&producer, &large));
+        assert_eq!(pull_sns(&mut consumer, 3).await, [1, 2, 3]);
+        assert_eq!(send(&producer, &mut consumer, &small).await, 4);
+
+        Ok(())
+    }
+
+    /// A fragment with no payload, which is what a stop fragment is, does not encode, so the
+    /// pipeline never has a stop fragment to send (BER-2554).
+    #[test]
+    fn tx_pipeline_stop_fragment_does_not_encode() {
+        let mut batch = WBatch::new_ephemeral(CONFIG_NOT_STREAMED.batch);
+        let empty = ZBuf::empty();
+        let mut stop = FragmentHeader {
+            reliability: Reliability::Reliable,
+            more: true,
+            sn: 1,
+            ext_qos: frame::ext::QoSType::new(Priority::DEFAULT),
+            ext_first: None,
+            ext_drop: Some(fragment::ext::Drop::new()),
+        };
+        assert!(batch.encode((&mut empty.reader(), &mut stop)).is_err());
+        assert!(batch.is_empty());
+    }
+
+    /// A fragmented message abandoned part way, and then sent again in full, starts again at
+    /// the SN after its last fragment sent: no stop fragment is queued, and the SN reserved
+    /// for it is given back, so the receiver sees no gap for a message it receives (BER-2554).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tx_pipeline_abandoned_fragments_leave_no_gap() -> ZResult<()> {
+        let (producer, mut consumer) = small_batches(4)?;
         let idx = Priority::DEFAULT as usize;
         let attempt = |deadline: &mut Deadline, msg: &NetworkMessage| {
             zlock!(producer.stage_in[idx])
@@ -1824,29 +1905,68 @@ mod tests {
         }
         let large = droppable(Priority::DEFAULT, Reliability::Reliable, false, 1024);
         let mut deadline = Deadline::new(Duration::from_millis(1), Some(Duration::from_millis(16)));
-        assert!(!attempt(&mut deadline, &large));
+        assert_eq!(attempt(&mut deadline, &large), Pushed::NoBatch);
         let (first, priority) = timeout(TIMEOUT, consumer.pull()).await?.unwrap();
         assert_eq!(first_sn(&first), 3);
         held.push((first, priority));
-        let (stop, priority) = timeout(TIMEOUT, consumer.pull()).await?.unwrap();
-        assert!(
-            stop.is_ephemeral() && stop.is_empty(),
-            "the stop fragment did not encode"
-        );
-        consumer.refill(stop, priority);
         for (batch, priority) in held {
             consumer.refill(batch, priority);
         }
 
         let mut deadline = Deadline::new(Duration::from_millis(1), Some(Duration::from_millis(16)));
-        assert!(attempt(&mut deadline, &large));
-        let mut sns = vec![];
-        for _ in 0..3 {
-            let (batch, priority) = timeout(TIMEOUT, consumer.pull()).await?.unwrap();
-            sns.push(first_sn(&batch));
-            consumer.refill(batch, priority);
-        }
-        assert_eq!(sns, [4, 5, 6]);
+        assert_eq!(attempt(&mut deadline, &large), Pushed::Queued);
+        assert_eq!(pull_sns(&mut consumer, 3).await, [4, 5, 6]);
+        assert_eq!(send(&producer, &mut consumer, &small).await, 7);
+
+        Ok(())
+    }
+
+    /// A queue of the largest size, full of one abandoned message's fragments, still queues
+    /// the next message: an abandoned message takes no ring slot beside its queue's batches
+    /// (BER-2554).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tx_pipeline_full_queue_keeps_every_batch() -> ZResult<()> {
+        let (producer, mut consumer) = small_batches(QueueSizeConf::MAX)?;
+        let small = droppable(Priority::DEFAULT, Reliability::Reliable, true, 8);
+
+        // One batch is held, so the message is abandoned when its fragments fill the others.
+        assert!(push(&producer, &small));
+        let (held, priority) = timeout(TIMEOUT, consumer.pull()).await?.unwrap();
+        assert_eq!(first_sn(&held), 0);
+        let large = droppable(Priority::DEFAULT, Reliability::Reliable, false, 40_000);
+        assert!(!push(&producer, &large));
+        consumer.refill(held, priority);
+        assert!(push(&producer, &small));
+
+        let mut expected: Vec<TransportSn> = (1..QueueSizeConf::MAX as TransportSn).collect();
+        // The abandoned message leaves one SN unused at the next frame.
+        expected.push(QueueSizeConf::MAX as TransportSn + 1);
+        assert_eq!(pull_sns(&mut consumer, QueueSizeConf::MAX).await, expected);
+
+        Ok(())
+    }
+
+    /// A message that does not fit the batches even as fragments is reported dropped, gives
+    /// back its SN and leaves one unused at the next frame, without marking the queue
+    /// congested (BER-2554).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tx_pipeline_unfragmentable_message_is_dropped() -> ZResult<()> {
+        let config = TransmissionPipelineConf {
+            batch: BatchConfig {
+                mtu: 3,
+                ..CONFIG_NOT_STREAMED.batch
+            },
+            ..CONFIG_NOT_STREAMED
+        };
+        let tct = TransportPriorityTx::make(Bits::from(TransportSn::MAX))?;
+        let (producer, _consumer) =
+            TransmissionPipeline::make(config, std::slice::from_ref(&tct), false);
+        let msg = droppable(Priority::DEFAULT, Reliability::Reliable, true, 8);
+
+        assert!(!push(&producer, &msg));
+        assert!(!producer.status.is_congested(Priority::DEFAULT));
+        assert_eq!(zlock!(tct.reliable).sn.now(), 0);
+        assert!(producer.status.take_skip(1, true));
 
         Ok(())
     }

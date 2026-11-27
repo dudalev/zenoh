@@ -277,7 +277,7 @@ impl Gateway {
         let this_zid = tables.data.zid;
 
         let ingress = Arc::new(ArcSwapOption::new(InterceptorsChain::empty().into()));
-        let mux = Arc::new(Mux::new(transport.clone(), InterceptorsChain::empty()));
+        let mux = Arc::new(Mux::new(transport.clone(), zid, InterceptorsChain::empty()));
 
         #[cfg(feature = "stats")]
         let stats = transport.get_stats().ok();
@@ -364,14 +364,19 @@ impl Gateway {
         let tables = &mut *wtables;
 
         let fid = tables.data.new_face_id();
-        let mux = Arc::new(McastMux::new(transport.clone(), InterceptorsChain::empty()));
+        let zid = ZenohIdProto::from_str("1").unwrap();
+        let mux = Arc::new(McastMux::new(
+            transport.clone(),
+            zid,
+            InterceptorsChain::empty(),
+        ));
 
         #[cfg(feature = "stats")]
         let stats = transport.get_stats().ok();
 
         let builder = FaceStateBuilder::new(
             fid,
-            ZenohIdProto::from_str("1").unwrap(),
+            zid,
             region,
             Bound::default(), // HACK(regions): this is a placeholder
             mux.clone(),

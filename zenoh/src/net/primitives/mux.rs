@@ -19,7 +19,7 @@ use std::{
 
 use arc_swap::ArcSwapOption;
 use zenoh_protocol::{
-    core::Reliability,
+    core::{Reliability, ZenohIdProto},
     network::{
         interest::Interest, Declare, NetworkBodyMut, NetworkMessageExt as _, NetworkMessageMut,
         Push, Request, Response, ResponseFinal,
@@ -41,14 +41,23 @@ pub struct Mux {
     pub handler: TransportUnicast,
     pub(crate) interceptor: ArcSwapOption<InterceptorsChain>,
     pub(crate) face: OnceLock<WeakFace>,
+    // The face's ZenohId, which a push drop names: read by the push drop observer, which is
+    // `unstable` (BER-2554).
+    #[cfg_attr(not(feature = "unstable"), allow(dead_code))]
+    zid: ZenohIdProto,
 }
 
 impl Mux {
-    pub(crate) fn new(handler: TransportUnicast, interceptor: InterceptorsChain) -> Mux {
+    pub(crate) fn new(
+        handler: TransportUnicast,
+        zid: ZenohIdProto,
+        interceptor: InterceptorsChain,
+    ) -> Mux {
         Mux {
             handler,
             face: OnceLock::new(),
             interceptor: ArcSwapOption::new(interceptor.into()),
+            zid,
         }
     }
 
@@ -84,16 +93,12 @@ impl Mux {
         if !drop_observer::is_push_drop_observed() {
             return;
         }
-        let zid = match self.face.get().and_then(|f| f.upgrade()) {
-            Some(face) => Some(face.state.zid),
-            None => self.handler.get_zid().ok(),
-        };
         let ctx = MuxContext {
             mux: self,
             cache: OnceCell::new(),
             expr: OnceCell::new(),
         };
-        drop_observer::report_push_drop(zid, ctx.full_expr(msg), msg.priority(), reason);
+        drop_observer::report_push_drop(self.zid, ctx.full_expr(msg), msg.priority(), reason);
     }
 }
 
@@ -259,14 +264,23 @@ pub struct McastMux {
     pub handler: TransportMulticast,
     pub(crate) face: OnceLock<Face>,
     pub(crate) interceptor: ArcSwapOption<InterceptorsChain>,
+    // The face's ZenohId, which a push drop names: read by the push drop observer, which is
+    // `unstable` (BER-2554).
+    #[cfg_attr(not(feature = "unstable"), allow(dead_code))]
+    zid: ZenohIdProto,
 }
 
 impl McastMux {
-    pub(crate) fn new(handler: TransportMulticast, interceptor: InterceptorsChain) -> McastMux {
+    pub(crate) fn new(
+        handler: TransportMulticast,
+        zid: ZenohIdProto,
+        interceptor: InterceptorsChain,
+    ) -> McastMux {
         McastMux {
             handler,
             face: OnceLock::new(),
             interceptor: ArcSwapOption::new(interceptor.into()),
+            zid,
         }
     }
 
@@ -304,12 +318,7 @@ impl McastMux {
             cache: OnceCell::new(),
             expr: OnceCell::new(),
         };
-        drop_observer::report_push_drop(
-            self.face.get().map(|f| f.state.zid),
-            ctx.full_expr(msg),
-            msg.priority(),
-            reason,
-        );
+        drop_observer::report_push_drop(self.zid, ctx.full_expr(msg), msg.priority(), reason);
     }
 }
 

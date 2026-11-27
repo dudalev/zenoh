@@ -11,15 +11,24 @@
 // Contributors:
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
-//! Losses the receive side of a unicast transport detects (BER-2554).
+//! Losses a unicast transport detects, on the receive side and on the send side (BER-2554).
 //!
 //! A sender built from this fork leaves one frame SN unused on a channel after it drops a
-//! message there, so its next frame on that channel arrives with a gap of 2. A gap reaches the
-//! observer as [`RxLossKind::SnGap`], and it is the one kind that a lost message from such a
-//! sender always produces. The fragment kinds report a reassembly that ended without a message.
+//! message there, so its next frame on that channel arrives with a gap of 2, which the
+//! receiver reports as [`RxLossKind::SnGap`]. A drop the sender never follows with a frame on
+//! that channel, and the batches a link held when it failed, reach no receiver: the new
+//! transport that replaces a failed link starts its SNs afresh. The sender reports the latter
+//! as a [`TxLoss`]. The fragment kinds report a reassembly that ended without a message.
 //!
 //! The multicast receive path reports nothing here.
-use std::sync::OnceLock;
+//!
+//! An observer is called on the thread that detected the loss, and must neither block nor
+//! panic. A panic is caught there, after the panic hook has reported it, so that it does not
+//! unwind through the transport's locks.
+use std::{
+    panic::{catch_unwind, AssertUnwindSafe},
+    sync::OnceLock,
+};
 
 use zenoh_protocol::{
     core::{Priority, Reliability, ZenohIdProto},
@@ -46,8 +55,10 @@ pub struct RxLoss {
 #[non_exhaustive]
 pub enum RxLossKind {
     /// A frame or fragment was accepted `gap` SNs after the last one on its channel, so
-    /// `gap - 1` SNs never arrived. From a sender built from this fork, each such gap is one or
-    /// more lost messages: messages it dropped, or frames that never arrived.
+    /// `gap - 1` SNs never arrived. From a sender built from this fork, a gap means that one
+    /// or more messages on that channel were lost. A sender that takes an SN after the last
+    /// fragment of a message, as upstream zenoh does, leaves a gap after every fragmented
+    /// message it sends, with nothing lost.
     SnGap { gap: TransportSn },
     /// A stop fragment arrived: the sender abandoned a fragmented message it had begun to
     /// send, and the fragments received of it were discarded. A sender built from this fork
@@ -69,7 +80,8 @@ pub type RxLossObserver = Box<dyn Fn(&RxLoss) + Send + Sync>;
 static OBSERVER: OnceLock<RxLossObserver> = OnceLock::new();
 
 /// Installs the process's rx loss observer. It is called on the receive thread that detected
-/// the loss, so it must not block. It can be installed once per process.
+/// the loss, holding that channel's lock, so it must neither block nor panic. It can be
+/// installed once per process.
 pub fn set_rx_loss_observer(observer: RxLossObserver) -> ZResult<()> {
     if OBSERVER.set(observer).is_err() {
         bail!("rx loss observer already installed");
@@ -85,12 +97,68 @@ pub(crate) fn report(
     kind: RxLossKind,
 ) {
     if let Some(observer) = OBSERVER.get() {
-        observer(&RxLoss {
+        let loss = RxLoss {
             peer,
             priority,
             reliability,
             kind,
-        });
+        };
+        // The panic hook has already reported a panic by the time it is caught.
+        let _ = catch_unwind(AssertUnwindSafe(|| observer(&loss)));
+    }
+}
+
+/// A loss the send side of a unicast transport detected, of messages it had accepted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TxLoss {
+    /// The peer the messages were for.
+    pub peer: ZenohIdProto,
+    /// The priority of the messages.
+    pub priority: Priority,
+    /// What was lost.
+    pub kind: TxLossKind,
+}
+
+/// What a sender lost. Exhaustive, so that zenoh maps every kind to a push drop reason.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxLossKind {
+    /// A link's write failed, or its flush at close did, with `batches` batches of that
+    /// priority queued or being written. Their messages never reach the peer. Batches already
+    /// written to the socket are not counted, nor messages queued in the instant the write
+    /// failed.
+    Unsent { batches: usize },
+    /// A `BlockFirst` push the transport had accepted found no batch before
+    /// `wait_before_close`. The transport then closes.
+    BlockFirstDropped,
+    /// A `BlockFirst` push the transport had accepted found the transport closed.
+    BlockFirstClosed,
+}
+
+/// Called with every loss a unicast send path detects.
+pub type TxLossObserver = Box<dyn Fn(&TxLoss) + Send + Sync>;
+
+static TX_OBSERVER: OnceLock<TxLossObserver> = OnceLock::new();
+
+/// Installs the process's tx loss observer. It is called on the thread that detected the
+/// loss, so it must neither block nor panic. It can be installed once per process.
+pub fn set_tx_loss_observer(observer: TxLossObserver) -> ZResult<()> {
+    if TX_OBSERVER.set(observer).is_err() {
+        bail!("tx loss observer already installed");
+    }
+    Ok(())
+}
+
+/// Reports a loss to the tx observer, when one is installed.
+pub(crate) fn report_tx(peer: ZenohIdProto, priority: Priority, kind: TxLossKind) {
+    if let Some(observer) = TX_OBSERVER.get() {
+        let loss = TxLoss {
+            peer,
+            priority,
+            kind,
+        };
+        // The panic hook has already reported a panic by the time it is caught.
+        let _ = catch_unwind(AssertUnwindSafe(|| observer(&loss)));
     }
 }
 
@@ -104,14 +172,26 @@ pub(crate) mod recorder {
     use super::RxLoss;
 
     static LOSSES: Mutex<Vec<RxLoss>> = Mutex::new(Vec::new());
+    static PANICKING: Mutex<Vec<ZenohIdProto>> = Mutex::new(Vec::new());
 
     /// Installs the recording observer, once per process.
     pub(crate) fn install() {
         static INSTALL: Once = Once::new();
         INSTALL.call_once(|| {
-            super::set_rx_loss_observer(Box::new(|loss| LOSSES.lock().unwrap().push(*loss)))
-                .unwrap();
+            super::set_rx_loss_observer(Box::new(|loss| {
+                LOSSES.lock().unwrap().push(*loss);
+                let panics = PANICKING.lock().unwrap().contains(&loss.peer);
+                if panics {
+                    panic!("the observer panics for this peer");
+                }
+            }))
+            .unwrap();
         });
+    }
+
+    /// Makes the observer panic, once it has recorded a loss from `peer`.
+    pub(crate) fn panic_for(peer: ZenohIdProto) {
+        PANICKING.lock().unwrap().push(peer);
     }
 
     /// The losses recorded from `peer`, in the order they were reported.

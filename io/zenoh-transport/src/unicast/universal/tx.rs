@@ -18,9 +18,11 @@ use zenoh_protocol::{
     core::{Priority, PriorityRange, Reliability},
     network::{NetworkMessageExt, NetworkMessageMut, NetworkMessageRef},
 };
-use zenoh_result::ZResult;
+use zenoh_result::{bail, ZResult};
 
 use super::transport::TransportUnicastUniversal;
+#[cfg(feature = "unstable")]
+use crate::common::loss::{self, TxLossKind};
 use crate::unicast::transport_unicast_inner::TransportUnicastTrait;
 
 impl TransportUnicastUniversal {
@@ -153,7 +155,8 @@ impl TransportUnicastUniversal {
             // No Link found
             #[cfg(feature = "stats")]
             self.stats.tx_observe_no_link(msg.as_ref());
-            return Ok(false);
+            // A transport loses its last link only as it closes (BER-2554).
+            bail!("Transport: {}. No link", self.config.zid);
         };
 
         let transport_link = transport_links
@@ -203,13 +206,22 @@ impl TransportUnicastUniversal {
             let msg = NetworkMessageExt::to_owned(&msg);
             zenoh_runtime::ZRuntime::Net.spawn_blocking(move || {
                 let msg = msg.as_ref();
-                if let Ok(pushed) = pipeline.push_network_message(msg) {
-                    transport.handle_push_result(
-                        msg,
-                        pushed,
-                        #[cfg(feature = "stats")]
-                        stats,
-                    );
+                // The push was reported queued, so a failure here is reported as a loss
+                // (BER-2554).
+                let lost = match pipeline.push_network_message(msg) {
+                    Ok(pushed) => {
+                        transport.handle_push_result(
+                            msg,
+                            pushed,
+                            #[cfg(feature = "stats")]
+                            stats,
+                        );
+                        (!pushed).then_some(TxLossKind::BlockFirstDropped)
+                    }
+                    Err(_) => Some(TxLossKind::BlockFirstClosed),
+                };
+                if let Some(kind) = lost {
+                    loss::report_tx(transport.config.zid, priority, kind);
                 }
                 let _ = block_first_notifier.notify();
             });

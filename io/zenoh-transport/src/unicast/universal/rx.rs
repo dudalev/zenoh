@@ -478,6 +478,23 @@ mod tests {
         }
     }
 
+    /// A panic in the rx loss observer stays in the observer: the frame is still accepted, and
+    /// the channel's lock is not poisoned (BER-2554).
+    #[test]
+    fn a_panicking_observer_does_not_unwind() {
+        recorder::install();
+        let peer = ZenohIdProto::rand();
+        recorder::panic_for(peer);
+        let channel = std::sync::Mutex::new(channel(1024));
+        channel.lock().unwrap().sync(10).unwrap();
+
+        assert!(accept(peer, &mut channel.lock().unwrap(), 10));
+        assert!(accept(peer, &mut channel.lock().unwrap(), 12));
+        assert!(!channel.is_poisoned());
+        assert!(accept(peer, &mut channel.lock().unwrap(), 13));
+        assert_eq!(kinds(peer), [RxLossKind::SnGap { gap: 2 }]);
+    }
+
     /// A repeated or old SN is dropped as before, and reported as no loss.
     #[test]
     fn a_repeated_or_old_sn_is_dropped_unreported() {
@@ -572,8 +589,8 @@ mod tests {
 
     /// A sender that runs out of batches part way through a fragmented message abandons it,
     /// and the receiver reports the loss as a gap at the sender's next frame (BER-2554). The
-    /// stop fragment carries no payload, and a fragment with none does not encode, so it never
-    /// reaches the wire.
+    /// stop fragment carries no payload, and a fragment with none does not encode, so the
+    /// sender queues none.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_fragment_dropped_mid_message_is_reported() {
         recorder::install();
@@ -604,19 +621,13 @@ mod tests {
         // second fragment finds no batch free.
         let large = push(4 * mtu as usize, false);
         assert!(!producer.push_network_message(large.as_ref()).unwrap());
-        let mut batches = vec![];
-        for _ in 0..2 {
-            let (batch, priority) = tokio::time::timeout(TIMEOUT, consumer.pull())
-                .await
-                .unwrap()
-                .unwrap();
-            batches.push(decode(&batch));
-            consumer.refill(batch, priority);
-        }
-        assert!(
-            matches!(&batches[..], [first, stop] if first.len() == 1 && stop.is_empty()),
-            "a first fragment, then a batch the stop fragment did not encode into"
-        );
+        let (batch, priority) = tokio::time::timeout(TIMEOUT, consumer.pull())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut batches = vec![decode(&batch)];
+        consumer.refill(batch, priority);
+        assert_eq!(batches[0].len(), 1, "the first fragment");
         let small = push(8, true);
         assert!(producer.push_network_message(small.as_ref()).unwrap());
         let (batch, _) = tokio::time::timeout(TIMEOUT, consumer.pull())
