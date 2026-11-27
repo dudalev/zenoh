@@ -44,9 +44,11 @@ use zenoh_result::{bail, ZResult};
 pub struct RxLoss {
     /// The peer that sent the frames.
     pub peer: ZenohIdProto,
-    /// The priority of the channel the loss is on.
+    /// The priority of the channel the loss is on: `Control` for
+    /// [`RxLossKind::TransportClosedLocally`], which is on every channel.
     pub priority: Priority,
-    /// The reliability of the channel the loss is on.
+    /// The reliability of the channel the loss is on: `Reliable` for
+    /// [`RxLossKind::TransportClosedLocally`].
     pub reliability: Reliability,
     /// What was lost.
     pub kind: RxLossKind,
@@ -74,6 +76,23 @@ pub enum RxLossKind {
     /// defragmentation buffer, or reassembled bytes that do not decode. The message was
     /// discarded.
     Defragmentation,
+    /// This process's zenoh closed the transport to a peer that may be alive, so whatever the
+    /// peer had sent and this process had not yet read is lost, and the transport that
+    /// replaces it starts its SNs afresh. A close the peer asked for (its Close message), and
+    /// a connection the peer's end closed or reset, as a peer whose process ends does, are
+    /// not reported.
+    TransportClosedLocally { reason: LocalClose },
+}
+
+/// Why this process's zenoh closed a transport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LocalClose {
+    /// Nothing arrived from the peer for its lease.
+    LeaseExpired,
+    /// A push that may not be dropped found no batch before `wait_before_close`, or did not
+    /// fit the link's batches even as fragments.
+    BlockingPushFailed,
 }
 
 /// Called with every loss a unicast receive path detects.
@@ -81,9 +100,10 @@ pub type RxLossObserver = Box<dyn Fn(&RxLoss) + Send + Sync>;
 
 static OBSERVER: OnceLock<RxLossObserver> = OnceLock::new();
 
-/// Installs the process's rx loss observer. It is called on the receive thread that detected
-/// the loss, holding that channel's lock, so it must neither block nor panic. It can be
-/// installed once per process.
+/// Installs the process's rx loss observer. It is called on the thread that detected the loss:
+/// a receive thread, which holds that channel's lock, or for a local close the thread that
+/// closed the transport. So it must neither block nor panic. It can be installed once per
+/// process.
 pub fn set_rx_loss_observer(observer: RxLossObserver) -> ZResult<()> {
     if OBSERVER.set(observer).is_err() {
         bail!("rx loss observer already installed");

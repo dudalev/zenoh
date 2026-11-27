@@ -90,12 +90,34 @@ yet at the commit that introduced the table.
     A link whose write fails refuses every later push at once. The TX task that drains a link
     never waits for a push's lock: it takes the batch a push is filling only if no push holds
     it, so a push waiting for a batch cannot hold up the process's single TX thread, and is
-    released when the link's tasks end.
+    released when the link's tasks end. A batch that holds only the transport's `Close` is
+    not counted.
+  * **Upstream defect, fixed: bytes written after a cut write.** A link whose write a close
+    cuts short writes nothing more on it, neither the batches it still holds nor the
+    `Close`, and reports them as `LinkClosedQueued`; its peer sees the connection end inside
+    a batch. Upstream went on to write them, and the peer read them as the rest of the cut
+    batch and then as batches of their own, from inside a message. In this fork's tests a
+    traced run showed the peer decoding such bytes as transport messages until one failed to
+    decode, and an untraced run ended in the peer's routing asserting on an `Interest` that
+    no peer sends, which a misread message would explain.
   * **Receiver.** A sender that drops a message leaves one frame SN unused at its next frame
     on that priority and reliability, so the receiver sees a gap of 2, and the receiving
     process's rx loss observer reports it with the peer's ZenohId. It also reports the
     fragments a unicast receive path discards. The wire protocol is unchanged: a receiver that
     does not report gaps accepts one, as upstream's does.
+  * **Local closes.** When this process's zenoh closes a unicast transport to a peer that may
+    be alive, its rx loss observer reports `TransportClosedLocally { reason }`, naming the
+    peer: what the peer sent and this process had not read is lost, and the transport that
+    replaces it starts its SNs afresh. The reasons are a lease that expired on the
+    transport's last link, and a push of this process's that may not be dropped finding no
+    batch before `wait_before_close`, or not fitting the link's batches even as fragments;
+    that is any blocking push, a publisher's or a reply. Not reported: the peer's Close
+    message, a connection the peer's end closed or reset, and this process closing its own
+    session. Which side sees what: a link stopped in both directions expires both leases, and
+    both sides report; a reader whose receive thread is held by its own callback keeps its
+    peer's lease alive, and reports the gap when it reads again; a reader whose whole process
+    stops past the writer's lease is reported by the writer, and on resuming sees a reset,
+    which it does not report.
   * **Upstream SN slips that would read as gaps, fixed:** the first frame after a transport
     opens read as a gap of 2 when the peer's initial SN was 0; every fragmented message took
     an SN after its last fragment, so the frame after it read as a gap; a fragmented message
@@ -107,10 +129,15 @@ yet at the commit that introduced the table.
     Only a stage's own batches enter its rings, so a ring the length of the cap cannot
     overflow. A size outside 1..=64 set on its own, which the config's validator does not
     see, fails the transport manager's build, so the session does not open.
-  * **Two links in one transport.** Two peers that open to each other at once can end up with
-    two links in one transport, even at `max_links` 1, since upstream counts only inbound
-    links against it. A link that fails beside another reports what it held as
-    `LinkClosedQueued`, and the receiver sees the gap on the other link.
+  * **Two links in one transport.** Two peers that list each other in `connect` can end up
+    with two links in one transport, even at `max_links` 1, since upstream counts only inbound
+    links against it; they need not start at once, a few seconds apart does it too. Peers
+    with no `connect` get one link. A link that fails beside another reports what it held as
+    `LinkClosedQueued`, a push it refuses is `Dropped`, and the receiver sees the gap on the
+    other link. In that state the writer cannot tell a dying peer from a live one: a dying
+    peer's write failures read as a live reader's loss, `LinkClosedQueued`, and at high rates
+    as `Dropped` too; and a push refused beside another link arms no SN skip, since its
+    pipeline is the failed one.
   * **Observers** are installed once per process and must neither block nor panic; a panic is
     caught after the panic hook has reported it, so an observer that must stop the process
     exits or aborts.
@@ -121,7 +148,10 @@ yet at the commit that introduced the table.
     message lost with a failed link, since the new transport starts its SNs afresh. Not
     counted in `LinkClosedQueued` or `LinkResetQueued`: batches already written to the
     socket, and, in the instant the link fails or closes, a push under way and the batch a
-    push is filling. A sender without these fixes, upstream's included, leaves a gap after
+    push is filling. A write the close cuts short is counted as `LinkClosedQueued`, also when
+    the peer was in fact dying. A local close for another reason, such as a frame that does
+    not decode, is not reported, nor is a local close of a multicast or low-latency
+    transport. A sender without these fixes, upstream's included, leaves a gap after
     every fragmented message it sends. Upstream defect, not fixed: on a transport without QoS
     the congested bit is set on `Priority::DEFAULT` and cleared on bit 0, so after its first
     congestion drop every later droppable push on it is dropped.

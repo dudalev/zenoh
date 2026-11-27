@@ -45,7 +45,7 @@ use std::{
 };
 
 use zenoh::{
-    drop_observer::{self, PushDropReason, RxLoss, RxLossKind},
+    drop_observer::{self, LocalClose, PushDropReason, RxLoss, RxLossKind},
     pubsub::Publisher,
     qos::{CongestionControl, Priority, Reliability},
     session::ZenohId,
@@ -53,11 +53,14 @@ use zenoh::{
 };
 use zenoh_core::ztimeout;
 use zenoh_link::EndPoint;
-use zenoh_test::{get_free_tcp_port, get_tcp_locator, TestSessions};
+use zenoh_test::{get_free_tcp_port, get_tcp_locator, wait_for_peers, TestSessions};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 const POLL: Duration = Duration::from_millis(10);
 const PAYLOAD_SIZE: usize = 1024;
+/// The socket buffers of a link that a test stops, smaller than one batch, so that a write of a
+/// full batch to a stopped proxy cannot complete.
+const SOCKET_BUFFER: usize = 8192;
 /// Larger than a loopback TCP link's batch of 49,152 bytes, so that a put of it is fragmented.
 const FRAGMENTED_SIZE: usize = 200_000;
 const MARKER: &[u8] = b"marker";
@@ -174,6 +177,16 @@ async fn open_pair(
     adjust(&mut connector);
     let subscribing = sessions.open_connector_with_cfg(connector).await;
     (publishing, subscribing)
+}
+
+/// Small socket buffers for the session's links: see [`SOCKET_BUFFER`].
+fn small_socket_buffers(config: &mut zenoh_config::Config) {
+    config
+        .insert_json5(
+            "transport/link/tcp",
+            &format!("{{so_sndbuf: {SOCKET_BUFFER}, so_rcvbuf: {SOCKET_BUFFER}}}"),
+        )
+        .unwrap();
 }
 
 fn without_shm(config: &mut zenoh_config::Config) {
@@ -514,6 +527,11 @@ impl Proxy {
     fn start(target: &EndPoint) -> Self {
         let port = get_free_tcp_port();
         let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
+        // A small receive buffer, inherited by the accepted socket, so that a stopped proxy
+        // holds little of what a peer sends it.
+        socket2::SockRef::from(&listener)
+            .set_recv_buffer_size(SOCKET_BUFFER)
+            .unwrap();
         let target = target.address().as_str().to_owned();
         let stalled = Arc::new(AtomicBool::new(false));
         let killed = Arc::new(AtomicBool::new(false));
@@ -576,9 +594,9 @@ fn pump(mut from: TcpStream, mut to: TcpStream, stalled: &AtomicBool, killed: &A
     // Dropping the sockets with data unread in them resets the connection.
 }
 
-/// Puts more than the sockets between a publisher and a stopped proxy can hold, so that the
-/// link's write blocks, and its queue fills: a drop alone can come from the process's TX thread
-/// being busy with other links.
+/// Puts far more than the small sockets between a publisher and a stopped proxy can hold, so
+/// that the link's write blocks and its queue fills, however busy the process's one TX thread
+/// is with other links.
 async fn overfill(publisher: &Publisher<'_>) {
     for _ in 0..4_000 {
         ztimeout!(publisher.put(vec![0_u8; 8 * PAYLOAD_SIZE])).unwrap();
@@ -622,7 +640,8 @@ async fn a_link_reset_at_its_peer_reports_its_queued_batches() {
     install_observers();
     const KEY: &str = "test/drop_observer/reset_link";
     let mut sessions = TestSessions::new();
-    let (publishing, subscribing, proxy) = open_pair_through_proxy(&mut sessions, |_| {}).await;
+    let (publishing, subscribing, proxy) =
+        open_pair_through_proxy(&mut sessions, small_socket_buffers).await;
 
     let _subscriber = ztimeout!(subscribing.declare_subscriber(KEY).callback(|_| {})).unwrap();
     let publisher = ztimeout!(publishing
@@ -662,6 +681,7 @@ async fn a_link_closed_while_its_peer_is_not_reading_reports_its_queued_batches(
         config
             .insert_json5("transport/link/tx/lease", "1000")
             .unwrap();
+        small_socket_buffers(config);
     })
     .await;
 
@@ -699,7 +719,16 @@ async fn a_failed_link_does_not_stall_the_other_links() {
     const BLOCKED: &str = "test/drop_observer/stall/blocked";
     const FILL: &str = "test/drop_observer/stall/fill";
     let mut sessions = TestSessions::new();
-    let publishing = sessions.open_listener().await;
+    let mut listener = sessions.get_listener_config(
+        &format!("tcp/127.0.0.1:0#so_sndbuf={SOCKET_BUFFER};so_rcvbuf={SOCKET_BUFFER}"),
+        1,
+    );
+    // A queue that holds seconds of the healthy stream, so that the one TX thread, shared with
+    // the tests running beside this one, can lag without the healthy link dropping.
+    listener
+        .insert_json5("transport/link/tx/queue/size/data", "16")
+        .unwrap();
+    let publishing = sessions.open_listener_with_cfg(listener).await;
     let healthy = sessions.open_connector().await;
     let proxy = Proxy::start(&get_tcp_locator(&publishing).await);
     let stalled = sessions
@@ -731,6 +760,14 @@ async fn a_failed_link_does_not_stall_the_other_links() {
         .congestion_control(CongestionControl::Drop)
         .reliability(Reliability::Reliable))
     .unwrap();
+    // Only the stalled subscriber matches the fill, which must be routed to it before the proxy
+    // stops: the declarations that route it would not get through after.
+    let filling = ztimeout!(publishing
+        .declare_publisher(FILL)
+        .congestion_control(CongestionControl::Drop)
+        .reliability(Reliability::Reliable))
+    .unwrap();
+    wait_matching(&filling).await;
     // Both subscribers receive before the test begins.
     let start = Instant::now();
     while healthy_received.load(Ordering::SeqCst) == 0
@@ -741,44 +778,76 @@ async fn a_failed_link_does_not_stall_the_other_links() {
         tokio::time::sleep(POLL).await;
     }
 
-    // About 1,000 puts a second to both, which the healthy subscriber keeps up with.
+    // About 1,000 small puts a second to both, which the healthy subscriber keeps up with.
     let streaming = Arc::new(AtomicBool::new(true));
     let stream = std::thread::spawn({
         let streaming = streaming.clone();
         move || {
             while streaming.load(Ordering::SeqCst) {
-                publisher.put(vec![0_u8; PAYLOAD_SIZE]).wait().unwrap();
+                publisher.put(vec![0_u8; 64]).wait().unwrap();
                 std::thread::sleep(Duration::from_millis(1));
             }
         }
     });
 
-    // The proxy stops reading, the link to the stalled subscriber fills, and a blocking put to
-    // it waits for a batch, holding its queue's lock.
+    // The proxy stops reading, and the link to the stalled subscriber fills until a blocking
+    // put to it waits for a batch, holding its queue's lock. A fill put dropped after the
+    // blocking put began, with the blocking put still not done, shows the queue full with no
+    // batch given back since. Until that is seen, the link is filled further and a new blocking
+    // put is tried.
     proxy.stalled.store(true, Ordering::SeqCst);
-    let filling = ztimeout!(publishing
-        .declare_publisher(FILL)
-        .congestion_control(CongestionControl::Drop)
-        .reliability(Reliability::Reliable))
-    .unwrap();
-    overfill(&filling).await;
-    let blocked = std::thread::spawn({
-        let publishing = publishing.clone();
-        move || {
-            publishing
-                .put(BLOCKED, vec![0_u8; PAYLOAD_SIZE])
-                .congestion_control(CongestionControl::Block)
-                .reliability(Reliability::Reliable)
-                .wait()
+    let fill_drops = || {
+        push_drops_to(stalled.zid())
+            .iter()
+            .filter(|dropped| dropped.key_expr.as_deref() == Some(FILL))
+            .count()
+    };
+    let start = Instant::now();
+    let blocked = loop {
+        assert!(start.elapsed() < TIMEOUT, "no blocking put waited");
+        overfill(&filling).await;
+        let blocking = Arc::new(AtomicBool::new(false));
+        let blocked = std::thread::spawn({
+            let (publishing, blocking) = (publishing.clone(), blocking.clone());
+            move || {
+                blocking.store(true, Ordering::SeqCst);
+                publishing
+                    .put(BLOCKED, vec![0_u8; PAYLOAD_SIZE])
+                    .congestion_control(CongestionControl::Block)
+                    .reliability(Reliability::Reliable)
+                    .wait()
+            }
+        });
+        wait_until("the blocking put begins", || {
+            blocking.load(Ordering::SeqCst)
+        })
+        .await;
+        let drops = fill_drops();
+        while fill_drops() == drops {
+            assert!(
+                start.elapsed() < TIMEOUT,
+                "no put to the stalled link dropped"
+            );
+            ztimeout!(filling.put(vec![0_u8; PAYLOAD_SIZE])).unwrap();
         }
-    });
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(!blocked.is_finished(), "the blocking put did not wait");
+        if !blocked.is_finished() {
+            break blocked;
+        }
+    };
 
+    // The other links go on while the reset link is torn down, which is within
+    // `wait_before_close` of the blocking put, the time a TX thread waiting for it would stop.
     let before = healthy_received.load(Ordering::SeqCst);
     proxy.kill();
-    tokio::time::sleep(Duration::from_millis(1_000)).await;
-    let after = healthy_received.load(Ordering::SeqCst);
+    let start = Instant::now();
+    while healthy_received.load(Ordering::SeqCst) < before + 100 {
+        assert!(
+            start.elapsed() < Duration::from_millis(2_500),
+            "the healthy subscriber stalled after the reset: {} received",
+            healthy_received.load(Ordering::SeqCst) - before
+        );
+        tokio::time::sleep(POLL).await;
+    }
     streaming.store(false, Ordering::SeqCst);
     tokio::task::spawn_blocking(move || {
         stream.join().unwrap();
@@ -787,14 +856,139 @@ async fn a_failed_link_does_not_stall_the_other_links() {
     .await
     .unwrap();
 
-    assert!(
-        after > before + 100,
-        "the healthy subscriber received {} in the second after the reset",
-        after - before
-    );
     assert_eq!(push_drops_to(healthy.zid()), []);
     assert_eq!(rx_losses_from(publishing.zid()), []);
 
+    sessions.close().await;
+}
+
+/// Whether the rx loss observer has reported a local close of the transport to `peer`.
+fn closed_locally(peer: ZenohId, reason: LocalClose) -> bool {
+    rx_losses_from(peer).iter().any(|loss| {
+        loss.kind == RxLossKind::TransportClosedLocally { reason }
+            && loss.priority.is_none()
+            && loss.reliability == Reliability::Reliable
+    })
+}
+
+fn any_local_close(peer: ZenohId) -> bool {
+    rx_losses_from(peer)
+        .iter()
+        .any(|loss| matches!(loss.kind, RxLossKind::TransportClosedLocally { .. }))
+}
+
+/// A blocking put that finds no batch before `wait_before_close`, because the peer reads
+/// nothing, closes the transport, and the putting process's rx loss observer reports it,
+/// naming the peer: what the peer had sent it and it had not read is lost.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_blocking_put_that_closes_the_transport_is_reported() {
+    zenoh::init_log_from_env_or("error");
+    install_observers();
+    const KEY: &str = "test/drop_observer/blocking_put";
+    let mut sessions = TestSessions::new();
+    let (writing, reading) = open_pair(&mut sessions, |config| {
+        small_socket_buffers(config);
+        config
+            .insert_json5(
+                "transport/link/tx/queue/congestion_control/block/wait_before_close",
+                "300000",
+            )
+            .unwrap();
+    })
+    .await;
+
+    // The writing peer holds its receive thread at the reading peer's first put, and so reads
+    // nothing more.
+    let gate = Arc::new(Gate::default());
+    let markers = Arc::new(AtomicUsize::new(0));
+    let _held = held_subscriber(&writing, KEY, &gate, &markers).await;
+    let publisher = ztimeout!(reading
+        .declare_publisher(KEY)
+        .congestion_control(CongestionControl::Block)
+        .reliability(Reliability::Reliable))
+    .unwrap();
+    wait_matching(&publisher).await;
+
+    let putting = std::thread::spawn({
+        let writer = writing.zid();
+        move || {
+            let start = Instant::now();
+            while !closed_locally(writer, LocalClose::BlockingPushFailed) {
+                assert!(start.elapsed() < TIMEOUT, "no local close reported");
+                publisher.put(vec![0_u8; 8 * PAYLOAD_SIZE]).wait().unwrap();
+            }
+        }
+    });
+    tokio::task::spawn_blocking(move || putting.join().unwrap())
+        .await
+        .unwrap();
+    gate.release();
+    assert!(!any_local_close(reading.zid()));
+
+    sessions.close().await;
+}
+
+/// A lease that expires closes the transport, and each peer whose lease of the other expired
+/// reports it, naming the other: with the proxy between them stopped, both do.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lease_that_expires_is_reported_by_each_side_it_expires_on() {
+    zenoh::init_log_from_env_or("error");
+    install_observers();
+    let mut sessions = TestSessions::new();
+    let (connecting, listening, proxy) = open_pair_through_proxy(&mut sessions, |config| {
+        config
+            .insert_json5("transport/link/tx/lease", "1000")
+            .unwrap();
+    })
+    .await;
+    wait_for_peers(&connecting, &listening).await;
+
+    proxy.stalled.store(true, Ordering::SeqCst);
+    wait_until("both leases expire", || {
+        closed_locally(listening.zid(), LocalClose::LeaseExpired)
+            && closed_locally(connecting.zid(), LocalClose::LeaseExpired)
+    })
+    .await;
+
+    proxy.kill();
+    sessions.close().await;
+}
+
+/// A peer that closes its session, a connection reset at the peer's end, as a peer whose
+/// process ends gives, and this process closing its own session are not reported as local
+/// closes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_that_leaves_and_an_own_close_are_not_reported() {
+    zenoh::init_log_from_env_or("error");
+    install_observers();
+    async fn wait_gone(session: &Session, peer: ZenohId) {
+        let start = Instant::now();
+        while session.info().peers_zid().await.any(|zid| zid == peer) {
+            assert!(start.elapsed() < TIMEOUT, "the transport stayed open");
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
+    // The peer closes its session, and this process then closes its own.
+    let mut sessions = TestSessions::new();
+    let (staying, leaving) = sessions.open_pairs().await;
+    wait_for_peers(&staying, &leaving).await;
+    ztimeout!(leaving.close()).unwrap();
+    wait_gone(&staying, leaving.zid()).await;
+    ztimeout!(staying.close()).unwrap();
+    assert!(!any_local_close(leaving.zid()));
+    assert!(!any_local_close(staying.zid()));
+    sessions.close().await;
+
+    // The connection is reset.
+    let mut sessions = TestSessions::new();
+    let (connecting, listening, proxy) = open_pair_through_proxy(&mut sessions, |_| {}).await;
+    wait_for_peers(&connecting, &listening).await;
+    proxy.kill();
+    wait_gone(&connecting, listening.zid()).await;
+    wait_gone(&listening, connecting.zid()).await;
+    assert!(!any_local_close(listening.zid()));
+    assert!(!any_local_close(connecting.zid()));
     sessions.close().await;
 }
 

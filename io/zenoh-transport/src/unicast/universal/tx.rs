@@ -22,7 +22,8 @@ use zenoh_result::{bail, ZResult};
 
 use super::transport::TransportUnicastUniversal;
 #[cfg(feature = "unstable")]
-use crate::common::loss::{self, TxLossKind};
+use crate::common::loss::TxLossKind;
+use crate::common::loss::{self, LocalClose, RxLossKind};
 use crate::unicast::transport_unicast_inner::TransportUnicastTrait;
 
 impl TransportUnicastUniversal {
@@ -81,6 +82,16 @@ impl TransportUnicastUniversal {
             tracing::error!(
                 "Unable to push non droppable network message to {}. Closing transport!",
                 self.config.zid
+            );
+            // What the peer sent and this process has not read is lost with the transport
+            // (BER-2554).
+            loss::report(
+                self.config.zid,
+                Priority::Control,
+                Reliability::Reliable,
+                RxLossKind::TransportClosedLocally {
+                    reason: LocalClose::BlockingPushFailed,
+                },
             );
             // Synchronously mark the transmission pipelines of this transport as disabled
             // so that any subsequent push to this unresponsive transport fails fast with

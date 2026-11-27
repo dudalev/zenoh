@@ -52,9 +52,9 @@ use zenoh_buffers::{
     buffer::Buffer,
     reader::{BacktrackableReader, HasReader},
 };
-use zenoh_link::Link;
+use zenoh_link::{Link, LinkUnicast};
 use zenoh_protocol::{
-    core::Priority,
+    core::{Priority, Reliability},
     transport::{KeepAlive, TransportMessage},
 };
 use zenoh_result::{bail, zerror, ZResult};
@@ -82,7 +82,7 @@ use super::transport::TransportUnicastUniversal;
 use crate::{
     common::{
         batch::{BatchConfig, RBatch, WBatch},
-        loss::{self, TxLossKind},
+        loss::{self, LocalClose, RxLossKind, TxLossKind},
         pipeline::{
             PipelineConsumer, TransmissionPipeline, TransmissionPipelineConf,
             TransmissionPipelineConsumer, TransmissionPipelineProducer,
@@ -330,9 +330,11 @@ async fn write_loop(
     cancellation_token: CancellationToken,
     #[cfg(feature = "stats")] stats: zenoh_stats::LinkStats,
 ) -> ZResult<()> {
-    // The priority of the batch being written, which is lost if its write fails or is
-    // cancelled (BER-2554).
+    // The priority of the batch being written if it holds network messages, which are lost if
+    // its write fails or is cancelled (BER-2554).
     let mut writing = None;
+    // Whether a write, of a batch or of a keep-alive, is in progress (BER-2554).
+    let mut mid_write = false;
     let task = async {
         loop {
             tokio::select! {
@@ -342,8 +344,10 @@ async fn write_loop(
                         break
                     };
                     debug_assert!(write_priority.is_none() || write_priority == Some(priority));
-                    writing = Some(priority);
+                    writing = batch.holds_network_message().then_some(priority);
+                    mid_write = true;
                     link.send_batch(&mut batch, write_priority).await?;
+                    mid_write = false;
                     writing = None;
                     // inform the latest message tracker that a message has been sent
                     keep_alive_tracker.reset();
@@ -362,8 +366,10 @@ async fn write_loop(
                     // the keep_alive period, we need to send a KeepAlive message
                     let message: TransportMessage = KeepAlive.into();
 
+                    mid_write = true;
                     #[allow(unused_variables)] // Used when stats feature is enabled
                     let n = link.send(&message, Some(Priority::Control)).await?;
+                    mid_write = false;
 
                     #[cfg(feature = "stats")]
                     {
@@ -385,6 +391,14 @@ async fn write_loop(
     }
     // A batch whose write the close cut short is lost too.
     let cut = writing;
+    if mid_write {
+        // A cut write can leave the stream inside a batch, whose rest the reader would take
+        // from the bytes written next: nothing more is written on the link (BER-2554).
+        pipeline.disable();
+        let unsent = cut.into_iter().chain(unsent(pipeline.drain()));
+        report_unsent(transport, link, Unwritten::NotRead, unsent);
+        bail!("{link}: write cut short by the close");
+    }
 
     // Drain the transmission pipeline and write remaining bytes on the wire
     let mut batches = pipeline.drain().into_iter();
@@ -425,13 +439,14 @@ async fn write_loop(
     Ok(())
 }
 
-/// The priorities of the batches among `batches` that hold messages.
+/// The priorities of the batches among `batches` that hold network messages, which a batch
+/// holding only a `Close` does not.
 fn unsent(
     batches: impl IntoIterator<Item = (Box<WBatch>, Priority)>,
 ) -> impl Iterator<Item = Priority> {
     batches
         .into_iter()
-        .filter(|(batch, _)| !batch.is_empty())
+        .filter(|(batch, _)| batch.holds_network_message())
         .map(|(_, priority)| priority)
 }
 
@@ -475,6 +490,21 @@ fn report_unsent(
             };
             loss::report_tx(transport.config.zid, priority, kind);
         }
+    }
+}
+
+/// Reports a lease that expired on the transport's last link, which closes the transport while
+/// its peer may be alive (BER-2554).
+fn report_lease_expiry(transport: &TransportUnicastUniversal, link: &LinkUnicast) {
+    if !transport.has_link_other_than(link) {
+        loss::report(
+            transport.config.zid,
+            Priority::Control,
+            Reliability::Reliable,
+            RxLossKind::TransportClosedLocally {
+                reason: LocalClose::LeaseExpired,
+            },
+        );
     }
 }
 
@@ -614,6 +644,7 @@ async fn read_loop<F: Fn() -> Box<[u8]>>(
                 transport.read_messages(batch, link, #[cfg(feature = "stats")] &stats)?;
             }
             _ = lease_tracker.wait_if(priority.unwrap_or(Priority::Control) == Priority::Control) => {
+                report_lease_expiry(&transport, &link.link);
                 bail!("{link}: expired after {} milliseconds", lease_tracker.timeout().as_millis());
             }
         }
@@ -722,6 +753,7 @@ async fn rx_task_uring(
     let pool = RecyclingObjectPool::new(n, move || vec![0_u8; mtu].into_boxed_slice());
 
     let c_link = link.clone();
+    let expiring = transport.clone();
 
     let batch_config = link.config.batch;
 
@@ -835,6 +867,7 @@ async fn rx_task_uring(
         }
         _ = lease_tracker.wait_if(true) => {
             tracing::debug!("Uring RX task stopped by lease timeout");
+            report_lease_expiry(&expiring, &link.link);
             bail!("{link}: expired after {} milliseconds", lease.as_millis());
         }
         _ = cancellation_token.cancelled() => {

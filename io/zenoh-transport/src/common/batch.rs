@@ -28,7 +28,9 @@ use zenoh_codec::{
 };
 use zenoh_protocol::{
     network::NetworkMessageRef,
-    transport::{fragment::FragmentHeader, frame::FrameHeader, BatchSize, TransportMessage},
+    transport::{
+        fragment::FragmentHeader, frame::FrameHeader, BatchSize, TransportBody, TransportMessage,
+    },
 };
 use zenoh_result::{zerror, ZResult};
 #[cfg(feature = "transport_compression")]
@@ -208,6 +210,8 @@ pub struct WBatch {
     // an ephemeral batch will not be recycled in the pipeline
     // it can be used to push a stop fragment when no batch are available
     pub ephemeral: bool,
+    // Whether a network message, whole or a fragment of it, is serialized on the batch
+    network: bool,
 }
 
 impl WBatch {
@@ -217,6 +221,7 @@ impl WBatch {
             codec: Zenoh080Batch::new(),
             config,
             ephemeral: false,
+            network: false,
             #[cfg(feature = "stats")]
             stats: WBatchStats::default(),
         };
@@ -244,6 +249,15 @@ impl WBatch {
         self.len() == 0
     }
 
+    /// Whether a [`NetworkMessage`], whole or a fragment of it, has been serialized on the
+    /// [`WBatch`]: one that holds only transport messages, such as a `Close`, holds none.
+    ///
+    /// [`NetworkMessage`]: zenoh_protocol::network::NetworkMessage
+    #[inline(always)]
+    pub fn holds_network_message(&self) -> bool {
+        self.network
+    }
+
     /// Get the total number of bytes that have been serialized on the [`WBatch`].
     #[inline(always)]
     pub fn len(&self) -> BatchSize {
@@ -256,6 +270,7 @@ impl WBatch {
     pub fn clear(&mut self) {
         self.buffer.clear();
         self.codec.clear();
+        self.network = false;
         #[cfg(feature = "stats")]
         {
             self.stats.clear();
@@ -368,6 +383,8 @@ impl Encode<&TransportMessage> for &mut WBatch {
     fn encode(self, x: &TransportMessage) -> Self::Output {
         let mut writer = self.buffer.writer();
         let res = self.codec.write(&mut writer, x);
+        self.network |=
+            res.is_ok() && matches!(x.body, TransportBody::Frame(_) | TransportBody::Fragment(_));
         #[cfg(feature = "stats")]
         {
             if res.is_ok() {
@@ -381,6 +398,7 @@ impl Encode<&TransportMessage> for &mut WBatch {
 impl Encode<NetworkMessageRef<'_>> for &mut WBatch {
     type Output = Result<(), BatchError>;
 
+    // Appends to the frame a framed write opened, which set `network`.
     fn encode(self, x: NetworkMessageRef) -> Self::Output {
         let mut writer = self.buffer.writer();
         self.codec.write(&mut writer, x)
@@ -393,6 +411,7 @@ impl Encode<(NetworkMessageRef<'_>, &FrameHeader)> for &mut WBatch {
     fn encode(self, x: (NetworkMessageRef, &FrameHeader)) -> Self::Output {
         let mut writer = self.buffer.writer();
         let res = self.codec.write(&mut writer, x);
+        self.network |= res.is_ok();
         #[cfg(feature = "stats")]
         {
             if res.is_ok() {
@@ -409,6 +428,7 @@ impl Encode<(&mut ZBufReader<'_>, &mut FragmentHeader)> for &mut WBatch {
     fn encode(self, x: (&mut ZBufReader<'_>, &mut FragmentHeader)) -> Self::Output {
         let mut writer = self.buffer.writer();
         let res = self.codec.write(&mut writer, x);
+        self.network |= res.is_ok();
         #[cfg(feature = "stats")]
         {
             if res.is_ok() {
@@ -616,13 +636,14 @@ mod tests {
     use std::vec;
 
     use rand::Rng;
+    use zenoh_buffers::{reader::HasReader, ZBuf};
     use zenoh_core::zcondfeat;
     use zenoh_protocol::{
         core::{CongestionControl, Priority, Reliability, WireExpr},
         network::{ext, NetworkMessage, NetworkMessageExt, Push},
         transport::{
             frame::{self, FrameHeader},
-            Fragment, KeepAlive, TransportMessage,
+            Close, Fragment, Frame, KeepAlive, TransportMessage,
         },
     };
 
@@ -675,6 +696,63 @@ mod tests {
                 let msg_out: TransportMessage = rbatch.decode().unwrap();
                 assert_eq!(msg_in, msg_out);
             }
+        }
+    }
+
+    /// A batch holds a network message once one is serialized on it, whole or as a fragment,
+    /// and not for transport messages alone (BER-2554).
+    #[test]
+    fn holds_network_message() {
+        let config = BatchConfig {
+            mtu: BatchSize::MAX,
+            is_streamed: true,
+            #[cfg(feature = "transport_compression")]
+            is_compression: false,
+        };
+        let mut batch = WBatch::new(config);
+        let nmsg = NetworkMessage::from(Push {
+            wire_expr: WireExpr::empty(),
+            ext_qos: ext::QoSType::new(Priority::DEFAULT, CongestionControl::Block, false),
+            ..Push::from(vec![0u8; 8])
+        });
+        let frame = FrameHeader {
+            reliability: Reliability::Reliable,
+            sn: 0,
+            ext_qos: frame::ext::QoSType::DEFAULT,
+        };
+
+        let close: TransportMessage = Close {
+            reason: 0,
+            session: false,
+        }
+        .into();
+        batch.encode(&close).unwrap();
+        let keep_alive: TransportMessage = KeepAlive.into();
+        batch.encode(&keep_alive).unwrap();
+        assert!(!batch.holds_network_message());
+
+        batch.encode((nmsg.as_ref(), &frame)).unwrap();
+        assert!(batch.holds_network_message());
+        batch.clear();
+        assert!(!batch.holds_network_message());
+
+        let payload = ZBuf::from(vec![0u8; 16]);
+        let mut reader = payload.reader();
+        let mut fragment = FragmentHeader {
+            reliability: Reliability::Reliable,
+            more: false,
+            sn: 0,
+            ext_qos: frame::ext::QoSType::DEFAULT,
+            ext_first: None,
+            ext_drop: None,
+        };
+        batch.encode((&mut reader, &mut fragment)).unwrap();
+        assert!(batch.holds_network_message());
+
+        for body in [Frame::rand().into(), Fragment::rand().into()] {
+            batch.clear();
+            batch.encode(&body).unwrap();
+            assert!(batch.holds_network_message(), "{body:?}");
         }
     }
 

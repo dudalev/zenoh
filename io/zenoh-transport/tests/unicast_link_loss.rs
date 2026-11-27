@@ -35,12 +35,16 @@ use std::{
     time::{Duration, Instant},
 };
 
+use zenoh_buffers::{buffer::SplitBuffer, reader::Reader};
+use zenoh_codec::{RCodec, Zenoh080};
 use zenoh_config::QueueSizeConf;
 use zenoh_core::ztimeout;
 use zenoh_link::{EndPoint, Link};
 use zenoh_protocol::{
     core::{CongestionControl, Priority, WhatAmI, ZenohIdProto},
-    network::{push::ext::QoSType, NetworkMessage, NetworkMessageMut, Push},
+    network::{push::ext::QoSType, NetworkBody, NetworkMessage, NetworkMessageMut, Push},
+    transport::{TransportBody, TransportMessage},
+    zenoh::PushBody,
 };
 use zenoh_result::ZResult;
 use zenoh_test::get_free_tcp_port;
@@ -55,7 +59,7 @@ use zenoh_transport::{
 const TIMEOUT: Duration = Duration::from_secs(60);
 const POLL: Duration = Duration::from_millis(10);
 
-type OnTxLoss = Arc<dyn Fn() + Send + Sync>;
+type OnTxLoss = Arc<dyn Fn(&TxLoss) + Send + Sync>;
 
 static TX_LOSSES: Mutex<Vec<TxLoss>> = Mutex::new(Vec::new());
 static RX_LOSSES: Mutex<Vec<RxLoss>> = Mutex::new(Vec::new());
@@ -73,7 +77,7 @@ fn install_observers() {
                 .as_ref()
                 .and_then(|on_loss| on_loss.get(&loss.peer).cloned());
             if let Some(on_loss) = on_loss {
-                on_loss();
+                on_loss(loss);
             }
         }))
         .unwrap();
@@ -167,13 +171,42 @@ impl TransportEventHandler for Sender {
     }
 }
 
-fn manager(zid: u8, handler: Arc<dyn TransportEventHandler>) -> TransportManager {
+fn zid(n: u16) -> ZenohIdProto {
+    ZenohIdProto::try_from([0x5a, n as u8, (n >> 8) as u8 + 1]).unwrap()
+}
+
+/// A manager with ZenohId `n`, and `data_queue` batches for the `Data` priority if given.
+fn manager(
+    n: u16,
+    handler: Arc<dyn TransportEventHandler>,
+    data_queue: Option<usize>,
+) -> TransportManager {
+    let mut sizes = QueueSizeConf::default();
+    if let Some(batches) = data_queue {
+        sizes.set_data(batches).unwrap();
+    }
     TransportManager::builder()
         .whatami(WhatAmI::Peer)
-        .zid(ZenohIdProto::try_from([zid]).unwrap())
+        .zid(zid(n))
+        .queue_size(sizes)
         .unicast(TransportManagerBuilderUnicast::default().max_links(2))
         .build_test(handler)
         .unwrap()
+}
+
+/// A manager with ZenohId `n` that sends payloads in its batches, never as shared memory.
+fn manager_without_shm(n: u16, handler: Arc<dyn TransportEventHandler>) -> TransportManager {
+    let builder = TransportManager::builder()
+        .whatami(WhatAmI::Peer)
+        .zid(zid(n))
+        .unicast(TransportManagerBuilderUnicast::default().max_links(2));
+    #[cfg(feature = "shared-memory")]
+    let builder = {
+        let mut shm = zenoh_config::ShmConf::default();
+        shm.set_enabled(false).unwrap();
+        builder.shm(shm)
+    };
+    builder.build_test(handler).unwrap()
 }
 
 fn droppable() -> NetworkMessage {
@@ -186,12 +219,13 @@ fn droppable() -> NetworkMessage {
 
 /// A TCP proxy that forwards between one accepted connection and `target`, stops reading
 /// while stalled, and drops both sockets once killed, so that a peer with data unread in them
-/// sees its connection reset.
+/// sees its connection reset. It keeps what it read from the accepted connection.
 struct Proxy {
     endpoint: EndPoint,
     stalled: Arc<AtomicBool>,
     killed: Arc<AtomicBool>,
     pumps: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    sent: Arc<Mutex<Vec<u8>>>,
 }
 
 impl Proxy {
@@ -201,21 +235,24 @@ impl Proxy {
         let stalled = Arc::new(AtomicBool::new(false));
         let killed = Arc::new(AtomicBool::new(false));
         let pumps = Arc::new(Mutex::new(vec![]));
+        let sent = Arc::new(Mutex::new(vec![]));
         std::thread::spawn({
             let (stalled, killed, pumps) = (stalled.clone(), killed.clone(), pumps.clone());
+            let sent = sent.clone();
             move || {
                 let (downstream, _) = listener.accept().unwrap();
                 let upstream = TcpStream::connect(("127.0.0.1", target_port)).unwrap();
-                for (from, to) in [
+                for (from, to, kept) in [
                     (
                         downstream.try_clone().unwrap(),
                         upstream.try_clone().unwrap(),
+                        Some(sent),
                     ),
-                    (upstream, downstream),
+                    (upstream, downstream, None),
                 ] {
                     let (stalled, killed) = (stalled.clone(), killed.clone());
                     pumps.lock().unwrap().push(std::thread::spawn(move || {
-                        pump(from, to, &stalled, &killed)
+                        pump(from, to, &stalled, &killed, kept.as_deref())
                     }));
                 }
             }
@@ -225,7 +262,18 @@ impl Proxy {
             stalled,
             killed,
             pumps,
+            sent,
         }
+    }
+
+    /// What the accepted connection sent, once it has ended.
+    fn sent_until_closed(&self) -> Vec<u8> {
+        wait_until("the proxy has two pumps", || {
+            self.pumps.lock().unwrap().len() == 2
+        });
+        let pump = self.pumps.lock().unwrap().remove(0);
+        pump.join().unwrap();
+        self.sent.lock().unwrap().clone()
     }
 
     fn kill(&self) {
@@ -236,7 +284,13 @@ impl Proxy {
     }
 }
 
-fn pump(mut from: TcpStream, mut to: TcpStream, stalled: &AtomicBool, killed: &AtomicBool) {
+fn pump(
+    mut from: TcpStream,
+    mut to: TcpStream,
+    stalled: &AtomicBool,
+    killed: &AtomicBool,
+    kept: Option<&Mutex<Vec<u8>>>,
+) {
     from.set_read_timeout(Some(POLL)).unwrap();
     let mut buf = [0_u8; 16_384];
     while !killed.load(Ordering::SeqCst) {
@@ -247,6 +301,9 @@ fn pump(mut from: TcpStream, mut to: TcpStream, stalled: &AtomicBool, killed: &A
         match from.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
+                if let Some(kept) = kept {
+                    kept.lock().unwrap().extend_from_slice(&buf[..n]);
+                }
                 if to.write_all(&buf[..n]).is_err() {
                     break;
                 }
@@ -267,6 +324,11 @@ fn wait_until(what: &str, condition: impl Fn() -> bool) {
     }
 }
 
+/// The size of the pushes that fill a link, and the byte they repeat: a stream read from
+/// inside one of them reads a batch length, and then a header, that this file never sends.
+const FILL_SIZE: usize = 8192;
+const FILL_BYTE: u8 = 0x5a;
+
 /// Pushes more than the sockets between the sender and a stopped proxy can hold, so that the
 /// link's write blocks and its queue fills: a drop alone can come from the TX thread being
 /// busy with other links.
@@ -276,15 +338,15 @@ fn overfill(transport: &TransportUnicast) {
         let mut msg = NetworkMessage::from(Push {
             wire_expr: "test/link_loss".into(),
             ext_qos: QoSType::new(Priority::Data, CongestionControl::Drop, false),
-            ..Push::from(vec![0_u8; 8192])
+            ..Push::from(vec![FILL_BYTE; FILL_SIZE])
         });
         dropped |= !transport.schedule(msg.as_mut()).unwrap();
     }
     assert!(dropped, "the link's queue never filled");
 }
 
-// Each test's managers have ZenohIds of their own: 20 to 59, 80 to 119 and 140 to 141 for the
-// trials, 200 and 201 for the close.
+// Each test's managers have ZenohIds of their own: 20 to 59, 80 to 119, 140 to 141, 210 to
+// 249 and 300 to 339 for the trials, 200 and 201 for the close.
 
 /// What the tx loss observer saw when a link through the proxy failed: whether the failed
 /// link was listed both before and after a push made right then, which it is when its own
@@ -293,13 +355,15 @@ fn overfill(transport: &TransportUnicast) {
 struct Failure {
     listed: bool,
     pushed: ZResult<bool>,
+    loss: TxLoss,
 }
 
 /// Opens a transport through a proxy, and a second link beside it if `two_links`, overfills the
 /// proxied link, resets it, and returns what the tx loss observer saw.
 async fn fail_proxied_link(
-    trial: u8,
+    trial: u16,
     two_links: bool,
+    data_queue: Option<usize>,
 ) -> (
     Failure,
     TransportManager,
@@ -307,12 +371,12 @@ async fn fail_proxied_link(
     TransportUnicast,
 ) {
     let received = Arc::new(AtomicUsize::new(0));
-    let receiving = manager(2 * trial, Arc::new(Counting(received)));
+    let receiving = manager(2 * trial, Arc::new(Counting(received)), None);
     let port = get_free_tcp_port();
     let listen: EndPoint = format!("tcp/127.0.0.1:{port}").parse().unwrap();
     ztimeout!(receiving.add_listener(listen.clone())).unwrap();
     let proxy = Proxy::start(port);
-    let sending = manager(2 * trial + 1, Arc::new(Sender));
+    let sending = manager(2 * trial + 1, Arc::new(Sender), data_queue);
     // The link through the proxy is the transport's first, which its pushes go to.
     let transport = ztimeout!(sending.open_transport_unicast(proxy.endpoint.clone())).unwrap();
     let links = if two_links {
@@ -327,7 +391,7 @@ async fn fail_proxied_link(
     let failure = Arc::new(Mutex::new(None));
     on_tx_loss(receiving.zid(), {
         let (transport, failure) = (transport.clone(), failure.clone());
-        Arc::new(move || {
+        Arc::new(move |loss: &TxLoss| {
             let listed = || transport.get_links().is_ok_and(|l| l.len() == links);
             failure.lock().unwrap().get_or_insert_with(|| {
                 let before = listed();
@@ -335,6 +399,7 @@ async fn fail_proxied_link(
                 Failure {
                     listed: before && listed(),
                     pushed,
+                    loss: *loss,
                 }
             });
         })
@@ -351,9 +416,14 @@ async fn fail_proxied_link(
 
 /// The failure of a proxied link, retried until the failed link's own write reports it, which
 /// it does unless the transport has removed the link first.
-async fn fail_proxied_link_listed(first_trial: u8, two_links: bool) -> (Failure, ZenohIdProto) {
+async fn fail_proxied_link_listed(
+    first_trial: u16,
+    two_links: bool,
+    data_queue: Option<usize>,
+) -> (Failure, ZenohIdProto) {
     for trial in first_trial..first_trial + 20 {
-        let (failure, receiving, sending, _) = fail_proxied_link(trial, two_links).await;
+        let (failure, receiving, sending, _) =
+            fail_proxied_link(trial, two_links, data_queue).await;
         let peer = receiving.zid();
         ztimeout!(sending.close());
         ztimeout!(receiving.close());
@@ -370,7 +440,7 @@ async fn fail_proxied_link_listed(first_trial: u8, two_links: bool) -> (Failure,
 async fn a_failed_write_refuses_later_pushes() {
     zenoh_util::init_log_from_env_or("error");
     install_observers();
-    let (failure, peer) = fail_proxied_link_listed(10, false).await;
+    let (failure, peer) = fail_proxied_link_listed(10, false, None).await;
 
     assert!(
         failure.pushed.is_err(),
@@ -394,14 +464,14 @@ async fn a_failed_write_refuses_later_pushes() {
 async fn a_link_that_fails_beside_another_reports_a_live_loss() {
     zenoh_util::init_log_from_env_or("error");
     install_observers();
-    let (failure, _) = fail_proxied_link_listed(40, true).await;
+    let (failure, _) = fail_proxied_link_listed(40, true, None).await;
     assert!(
         matches!(failure.pushed, Ok(false)),
         "a push the failed link refused is a drop: {:?}",
         failure.pushed
     );
 
-    let (_, receiving, sending, transport) = fail_proxied_link(70, true).await;
+    let (_, receiving, sending, transport) = fail_proxied_link(70, true, None).await;
     let losses = tx_losses_to(receiving.zid());
     assert!(
         losses.iter().any(|loss| matches!(
@@ -432,12 +502,13 @@ async fn a_link_that_fails_beside_another_reports_a_live_loss() {
 }
 
 /// A link that closes at this end while its write is cut short counts the batch it was
-/// writing, even with nothing else of that priority queued.
+/// writing, even with nothing else of that priority queued, and not the batch that holds only
+/// the transport's `Close`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_close_counts_the_batch_being_written() {
     zenoh_util::init_log_from_env_or("error");
     install_observers();
-    let receiving = manager(200, Arc::new(Counting::default()));
+    let receiving = manager(200, Arc::new(Counting::default()), None);
     let port = get_free_tcp_port();
     let listen: EndPoint = format!("tcp/127.0.0.1:{port}").parse().unwrap();
     ztimeout!(receiving.add_listener(listen)).unwrap();
@@ -448,7 +519,7 @@ async fn a_close_counts_the_batch_being_written() {
     sizes.set_data(1).unwrap();
     let sending = TransportManager::builder()
         .whatami(WhatAmI::Peer)
-        .zid(ZenohIdProto::try_from([201]).unwrap())
+        .zid(zid(201))
         .queue_size(sizes)
         .unicast(TransportManagerBuilderUnicast::default().lease(Duration::from_secs(1)))
         .build_test(Arc::new(Sender))
@@ -458,14 +529,141 @@ async fn a_close_counts_the_batch_being_written() {
     proxy.stalled.store(true, Ordering::SeqCst);
     overfill(&transport);
     ztimeout!(transport.close()).unwrap();
-    wait_until("the batch being written is reported", || {
-        tx_losses_to(receiving.zid()).iter().any(|loss| {
-            loss.priority == Priority::Data
-                && matches!(loss.kind, TxLossKind::ClosedQueued { batches: 1 })
-        })
-    });
+    // The close returns once the link's TX task has reported.
+    let losses = tx_losses_to(receiving.zid());
+    assert!(
+        losses.iter().any(|loss| loss.priority == Priority::Data
+            && matches!(loss.kind, TxLossKind::ClosedQueued { batches: 1 })),
+        "{losses:?}"
+    );
+    assert!(
+        losses
+            .iter()
+            .all(|loss| loss.priority != Priority::Background),
+        "{losses:?}"
+    );
 
     proxy.kill();
     ztimeout!(sending.close());
     ztimeout!(receiving.close());
+}
+
+/// Whether `stream`, the bytes a TCP link wrote, is whole batches of messages this file sends,
+/// with possibly the last batch cut short and nothing after it. Bytes written after a batch
+/// cut short are read as its rest and then as batches of their own, and a read of them, which
+/// starts inside a push, fails this.
+fn ends_inside_a_batch(stream: &[u8]) -> Result<bool, String> {
+    let codec = Zenoh080::new();
+    let mut at = 0;
+    while at < stream.len() {
+        let Some(prefix) = stream.get(at..at + 2) else {
+            return Ok(true);
+        };
+        let len = u16::from_le_bytes([prefix[0], prefix[1]]) as usize;
+        at += 2;
+        if len == 0 {
+            return Err(format!("an empty batch at byte {at}"));
+        }
+        let whole = stream.len() - at >= len;
+        let mut reader = &stream[at..(at + len).min(stream.len())];
+        while reader.can_read() {
+            let message: TransportMessage = match codec.read(&mut reader) {
+                Ok(message) => message,
+                Err(_) if !whole => return Ok(true),
+                Err(_) => return Err(format!("a batch at byte {at} does not decode")),
+            };
+            match message.body {
+                TransportBody::InitSyn(_)
+                | TransportBody::OpenSyn(_)
+                | TransportBody::KeepAlive(_)
+                | TransportBody::Close(_) => {}
+                TransportBody::Frame(frame) => {
+                    for message in frame.payload {
+                        let NetworkBody::Push(Push {
+                            payload: PushBody::Put(put),
+                            ..
+                        }) = message.body
+                        else {
+                            return Err(format!("a batch at byte {at} holds {message:?}"));
+                        };
+                        let payload = put.payload.contiguous();
+                        if payload.as_ref() != [FILL_BYTE; FILL_SIZE] {
+                            let first = payload.iter().position(|b| *b != FILL_BYTE);
+                            return Err(format!(
+                                "a push in the batch at byte {at} of {}, {len} long, holds {} \
+                                 bytes, the first not sent at {first:?}: {:02x?}",
+                                stream.len(),
+                                payload.len(),
+                                first.map(|i| &payload[i..(i + 16).min(payload.len())])
+                            ));
+                        }
+                    }
+                }
+                body => return Err(format!("a batch at byte {at} holds {body:?}")),
+            }
+        }
+        if !whole {
+            return Ok(true);
+        }
+        at += len;
+    }
+    Ok(false)
+}
+
+/// A link whose write a close cuts short writes nothing more: the cut can leave the stream
+/// inside a batch, whose rest the peer would take from the bytes written next. The proxy
+/// starts reading again as the close takes the link, which a write after the cut would then
+/// complete into.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_close_that_cuts_a_write_writes_nothing_more() {
+    zenoh_util::init_log_from_env_or("error");
+    install_observers();
+    for trial in 105..125 {
+        let receiving = manager_without_shm(2 * trial, Arc::new(Counting::default()));
+        let port = get_free_tcp_port();
+        let listen: EndPoint = format!("tcp/127.0.0.1:{port}").parse().unwrap();
+        ztimeout!(receiving.add_listener(listen)).unwrap();
+        let proxy = Proxy::start(port);
+        let sending = manager_without_shm(2 * trial + 1, Arc::new(Sender));
+        let transport = ztimeout!(sending.open_transport_unicast(proxy.endpoint.clone())).unwrap();
+
+        proxy.stalled.store(true, Ordering::SeqCst);
+        overfill(&transport);
+        let closing = tokio::spawn({
+            let transport = transport.clone();
+            async move { transport.close().await }
+        });
+        wait_until("the close takes the link", || {
+            transport.get_links().map_or(true, |links| links.is_empty())
+        });
+        proxy.stalled.store(false, Ordering::SeqCst);
+        ztimeout!(closing).unwrap().unwrap();
+        let stream = proxy.sent_until_closed();
+        proxy.kill();
+        ztimeout!(sending.close());
+        ztimeout!(receiving.close());
+
+        // The trial counts when the close cut a write that had begun, which the proxy reading
+        // again before the close came can let finish: the link then reports the batch it was
+        // writing, and the stream ends inside it.
+        let ended_inside = ends_inside_a_batch(&stream).unwrap();
+        let cut = tx_losses_to(receiving.zid()).iter().any(|loss| {
+            loss.priority == Priority::Data && matches!(loss.kind, TxLossKind::ClosedQueued { .. })
+        });
+        if cut && ended_inside {
+            return;
+        }
+    }
+    panic!("no close cut a write");
+}
+
+/// A link whose write fails counts the batch it was writing, even with nothing else of that
+/// priority queued.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_write_counts_the_batch_being_written() {
+    zenoh_util::init_log_from_env_or("error");
+    install_observers();
+    let (failure, _) = fail_proxied_link_listed(150, false, Some(1)).await;
+    assert_eq!(failure.loss.priority, Priority::Data);
+    assert_eq!(failure.loss.kind, TxLossKind::ResetQueued { batches: 1 });
 }

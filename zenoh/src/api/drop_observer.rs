@@ -148,17 +148,20 @@ pub(crate) fn report_push_drop(
 pub struct RxLoss {
     /// The peer that sent the frames.
     pub zid: ZenohId,
-    /// The priority of the channel the loss is on, or `None` for zenoh's own control priority.
+    /// The priority of the channel the loss is on, or `None` for zenoh's own control priority,
+    /// which is what [`RxLossKind::TransportClosedLocally`] carries, being on every channel.
     pub priority: Option<Priority>,
-    /// The reliability of the channel the loss is on.
+    /// The reliability of the channel the loss is on: `Reliable` for
+    /// [`RxLossKind::TransportClosedLocally`].
     pub reliability: Reliability,
     /// What was lost.
     pub kind: RxLossKind,
 }
 
-/// Installs the process's rx loss observer. It is called on the receive thread that detected
-/// the loss, holding that channel's lock, so it must neither block nor panic. It can be
-/// installed once per process.
+/// Installs the process's rx loss observer. It is called on the thread that detected the loss:
+/// a receive thread, which holds that channel's lock, or for a local close the thread that
+/// closed the transport. So it must neither block nor panic. It can be installed once per
+/// process.
 pub fn set_rx_loss_observer(observer: impl Fn(&RxLoss) + Send + Sync + 'static) -> ZResult<()> {
     loss::set_rx_loss_observer(Box::new(move |loss| {
         observer(&RxLoss {

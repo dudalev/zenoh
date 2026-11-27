@@ -873,11 +873,15 @@ pub mod qos {
 /// connection was closed or reset at the peer's end, as a peer whose process ends gives. A
 /// transport that closes is
 /// [`PushDropReason::TransportClosed`](drop_observer::PushDropReason::TransportClosed), which
-/// is not a drop. Only unicast transports report receive-side losses. Observers must neither
-/// block nor panic; a panic is caught after the panic hook has reported it.
+/// is not a drop. When this process's zenoh closes a transport to a peer that may be alive,
+/// for a lease that expired or a blocking push that failed, its rx loss observer is told with
+/// [`RxLossKind::TransportClosedLocally`](drop_observer::RxLossKind::TransportClosedLocally),
+/// since what the peer sent and this process had not read is lost. Only unicast transports
+/// report receive-side losses. Observers must neither block nor panic; a panic is caught after
+/// the panic hook has reported it.
 #[zenoh_macros::unstable]
 pub mod drop_observer {
-    pub use zenoh_transport::common::loss::RxLossKind;
+    pub use zenoh_transport::common::loss::{LocalClose, RxLossKind};
 
     pub use crate::api::drop_observer::{
         set_push_drop_observer, set_rx_loss_observer, PushDrop, PushDropReason, RxLoss,
