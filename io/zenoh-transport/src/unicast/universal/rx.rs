@@ -11,15 +11,15 @@
 // Contributors:
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
-use std::{fmt::Debug, sync::MutexGuard};
+use std::fmt::Debug;
 
 use zenoh_buffers::{buffer::Buffer, reader::BacktrackableReader};
 use zenoh_codec::transport::frame::FrameReader;
 use zenoh_core::zlock;
 use zenoh_link::Link;
 use zenoh_protocol::{
-    core::{Priority, Reliability},
-    network::NetworkMessageMut,
+    core::{Priority, Reliability, ZenohIdProto},
+    network::{NetworkMessage, NetworkMessageMut},
     transport::{Close, Fragment, KeepAlive, TransportBody, TransportMessage, TransportSn},
 };
 use zenoh_result::{bail, zerror, ZResult};
@@ -28,6 +28,7 @@ use super::transport::TransportUnicastUniversal;
 use crate::{
     common::{
         batch::{Decode, RBatch},
+        loss::{self, RxLossKind},
         priority::TransportChannelRx,
     },
     unicast::{link::TransportLinkUnicastRx, transport_unicast_inner::TransportUnicastTrait},
@@ -117,7 +118,14 @@ impl TransportUnicastUniversal {
             Reliability::BestEffort => zlock!(c.best_effort),
         };
 
-        if !self.verify_sn("Frame", frame.sn, &mut guard)? {
+        if !verify_sn(
+            self.config.zid,
+            "Frame",
+            frame.sn,
+            priority,
+            frame.reliability,
+            &mut guard,
+        )? {
             // Drop invalid message and continue
             return Ok(());
         }
@@ -148,106 +156,50 @@ impl TransportUnicastUniversal {
         #[cfg(feature = "stats")] stats: &zenoh_stats::LinkStats,
         #[cfg(feature = "shared-memory")] link: &TransportLinkUnicastRx,
     ) -> ZResult<()> {
-        let Fragment {
-            reliability,
-            more,
-            sn,
-            ext_qos: qos,
-            ext_first,
-            ext_drop,
-            payload,
-        } = fragment;
-
+        let priority = fragment.ext_qos.priority();
         let c = if self.is_qos() {
-            &self.priority_rx[qos.priority() as usize]
-        } else if qos.priority() == Priority::DEFAULT {
+            &self.priority_rx[priority as usize]
+        } else if priority == Priority::DEFAULT {
             &self.priority_rx[0]
         } else {
             bail!(
                 "Transport: {}. Unknown priority: {:?}.",
                 self.config.zid,
-                qos.priority()
+                priority
             );
         };
 
-        let mut guard = match reliability {
+        let mut guard = match fragment.reliability {
             Reliability::Reliable => zlock!(c.reliable),
             Reliability::BestEffort => zlock!(c.best_effort),
         };
 
-        if !self.verify_sn("Fragment", sn, &mut guard)? {
-            // Drop invalid message and continue
+        let Some(mut msg) = receive_fragment(
+            self.config.zid,
+            self.config.patch.has_fragmentation_markers(),
+            &mut guard,
+            fragment,
+        )?
+        else {
             return Ok(());
+        };
+        if let Some(callback) = self.callback.get() {
+            return self.trigger_callback(
+                callback.as_ref(),
+                msg.as_mut(),
+                #[cfg(feature = "stats")]
+                stats,
+                #[cfg(feature = "shared-memory")]
+                link,
+            );
         }
-        if self.config.patch.has_fragmentation_markers() {
-            if ext_first.is_some() {
-                guard.defrag.clear();
-            } else if guard.defrag.is_empty() {
-                tracing::trace!(
-                    "Transport: {}. First fragment received without start marker.",
-                    self.manager.config.zid,
-                );
-                return Ok(());
-            }
-            if ext_drop.is_some() {
-                guard.defrag.clear();
-                return Ok(());
-            }
-        }
-        if guard.defrag.is_empty() {
-            let _ = guard.defrag.sync(sn);
-        }
-        if let Err(e) = guard.defrag.push(sn, payload) {
-            // Defrag errors don't close transport
-            tracing::trace!("{}", e);
-            return Ok(());
-        }
-        if !more {
-            // When shared-memory feature is disabled, msg does not need to be mutable
-            if let Some(mut msg) = guard.defrag.defragment() {
-                if let Some(callback) = self.callback.get() {
-                    return self.trigger_callback(
-                        callback.as_ref(),
-                        msg.as_mut(),
-                        #[cfg(feature = "stats")]
-                        stats,
-                        #[cfg(feature = "shared-memory")]
-                        link,
-                    );
-                } else {
-                    tracing::debug!(
-                        "Transport: {}. No callback available, dropping messages: {:?}",
-                        self.config.zid,
-                        msg
-                    );
-                }
-            } else {
-                tracing::trace!("Transport: {}. Defragmentation error.", self.config.zid);
-            }
-        }
+        tracing::debug!(
+            "Transport: {}. No callback available, dropping messages: {:?}",
+            self.config.zid,
+            msg
+        );
 
         Ok(())
-    }
-
-    fn verify_sn(
-        &self,
-        message_type: &str,
-        sn: TransportSn,
-        guard: &mut MutexGuard<'_, TransportChannelRx>,
-    ) -> ZResult<bool> {
-        let precedes = guard.sn.roll(sn)?;
-        if !precedes {
-            tracing::trace!(
-                "Transport: {}. {} with invalid SN dropped: {}. Expected: {}.",
-                self.config.zid,
-                message_type,
-                sn,
-                guard.sn.next()
-            );
-            return Ok(false);
-        }
-
-        Ok(true)
     }
 
     pub(super) fn read_messages<TBuffer: BacktrackableReader + Buffer + Debug>(
@@ -314,5 +266,397 @@ impl TransportUnicastUniversal {
         // Process the received message
 
         Ok(())
+    }
+}
+
+/// Accepts `sn` if it follows the last SN accepted on `channel`, and reports to the rx loss
+/// observer the SNs it skips (BER-2554).
+fn verify_sn(
+    peer: ZenohIdProto,
+    message_type: &str,
+    sn: TransportSn,
+    priority: Priority,
+    reliability: Reliability,
+    channel: &mut TransportChannelRx,
+) -> ZResult<bool> {
+    let gap = channel.sn.gap(sn)?;
+    if !channel.sn.roll(sn)? {
+        tracing::trace!(
+            "Transport: {}. {} with invalid SN dropped: {}. Expected: {}.",
+            peer,
+            message_type,
+            sn,
+            channel.sn.next()
+        );
+        return Ok(false);
+    }
+    if gap > 1 {
+        loss::report(peer, priority, reliability, RxLossKind::SnGap { gap });
+    }
+
+    Ok(true)
+}
+
+/// Feeds a fragment into its channel's reassembly and returns the message it completes. A
+/// fragment that ends a reassembly without a message is reported to the rx loss observer
+/// (BER-2554).
+fn receive_fragment(
+    peer: ZenohIdProto,
+    has_fragmentation_markers: bool,
+    channel: &mut TransportChannelRx,
+    fragment: Fragment,
+) -> ZResult<Option<NetworkMessage>> {
+    let Fragment {
+        reliability,
+        more,
+        sn,
+        ext_qos: qos,
+        ext_first,
+        ext_drop,
+        payload,
+    } = fragment;
+    let priority = qos.priority();
+    let report = |kind| loss::report(peer, priority, reliability, kind);
+
+    if !verify_sn(peer, "Fragment", sn, priority, reliability, channel)? {
+        // Drop invalid message and continue
+        return Ok(None);
+    }
+    if has_fragmentation_markers {
+        if ext_first.is_some() {
+            channel.defrag.clear();
+        } else if channel.defrag.is_empty() {
+            tracing::trace!(
+                "Transport: {}. First fragment received without start marker.",
+                peer,
+            );
+            report(RxLossKind::FragmentWithoutStart);
+            return Ok(None);
+        }
+        if ext_drop.is_some() {
+            channel.defrag.clear();
+            report(RxLossKind::FragmentDropped);
+            return Ok(None);
+        }
+    }
+    if channel.defrag.is_empty() {
+        let _ = channel.defrag.sync(sn);
+    }
+    if let Err(e) = channel.defrag.push(sn, payload) {
+        // Defrag errors don't close transport
+        tracing::trace!("{}", e);
+        report(RxLossKind::Defragmentation);
+        return Ok(None);
+    }
+    if !more {
+        let msg = channel.defrag.defragment();
+        if msg.is_none() {
+            tracing::trace!("Transport: {}. Defragmentation error.", peer);
+            report(RxLossKind::Defragmentation);
+        }
+        return Ok(msg);
+    }
+
+    Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use zenoh_buffers::{
+        reader::{HasReader, Reader},
+        writer::HasWriter,
+        ZSlice,
+    };
+    use zenoh_codec::{RCodec, WCodec, Zenoh080};
+    use zenoh_config::{QueueAllocConf, QueueAllocMode};
+    use zenoh_protocol::{
+        core::{Bits, CongestionControl, Priority, Reliability, ZenohIdProto},
+        network::{ext, NetworkBody, NetworkMessage, NetworkMessageExt, Push},
+        transport::{fragment, BatchSize, Fragment, Frame, TransportBody, TransportSn},
+    };
+
+    use super::{receive_fragment, verify_sn, TransportMessage};
+    use crate::common::{
+        batch::{BatchConfig, WBatch},
+        loss::{recorder, RxLoss, RxLossKind},
+        pipeline::{PipelineConsumer, TransmissionPipeline, TransmissionPipelineConf},
+        priority::{TransportChannelRx, TransportPriorityTx},
+    };
+
+    const TIMEOUT: Duration = Duration::from_secs(60);
+    const PRIORITY: Priority = Priority::Data;
+    const RELIABILITY: Reliability = Reliability::Reliable;
+
+    fn channel(defrag_buff_size: usize) -> TransportChannelRx {
+        TransportChannelRx::make(RELIABILITY, Bits::U32, defrag_buff_size).unwrap()
+    }
+
+    fn accept(peer: ZenohIdProto, channel: &mut TransportChannelRx, sn: TransportSn) -> bool {
+        verify_sn(peer, "Frame", sn, PRIORITY, RELIABILITY, channel).unwrap()
+    }
+
+    fn kinds(peer: ZenohIdProto) -> Vec<RxLossKind> {
+        recorder::losses_from(peer)
+            .into_iter()
+            .map(|loss| loss.kind)
+            .collect()
+    }
+
+    fn push(payload_size: usize, express: bool) -> NetworkMessage {
+        NetworkMessage {
+            body: NetworkBody::Push(Push {
+                wire_expr: "test".into(),
+                ext_qos: ext::QoSType::new(PRIORITY, CongestionControl::Drop, express),
+                ..Push::from(vec![7_u8; payload_size])
+            }),
+            reliability: RELIABILITY,
+        }
+    }
+
+    fn fragment(sn: TransportSn, first: bool, more: bool, payload: ZSlice) -> Fragment {
+        Fragment {
+            reliability: RELIABILITY,
+            more,
+            sn,
+            payload,
+            ext_qos: fragment::ext::QoSType::new(PRIORITY),
+            ext_first: first.then(fragment::ext::First::new),
+            ext_drop: None,
+        }
+    }
+
+    /// `msg` serialized as it is fragmented, cut in two.
+    fn halves(msg: &NetworkMessage) -> (ZSlice, ZSlice) {
+        let mut bytes: Vec<u8> = vec![];
+        let mut writer = bytes.writer();
+        Zenoh080::new().write(&mut writer, msg.as_ref()).unwrap();
+        let (a, b) = bytes.split_at(bytes.len() / 2);
+        (a.to_vec().into(), b.to_vec().into())
+    }
+
+    /// A frame accepted two SNs after the previous one reports a gap of 2; consecutive SNs
+    /// report nothing (BER-2554).
+    #[test]
+    fn an_sn_gap_is_reported_with_its_size() {
+        recorder::install();
+        let peer = ZenohIdProto::rand();
+        let mut channel = channel(1024);
+        channel.sync(10).unwrap();
+
+        assert!(accept(peer, &mut channel, 10));
+        assert!(accept(peer, &mut channel, 11));
+        assert_eq!(kinds(peer), []);
+
+        assert!(accept(peer, &mut channel, 13));
+        assert_eq!(
+            recorder::losses_from(peer),
+            [RxLoss {
+                peer,
+                priority: PRIORITY,
+                reliability: RELIABILITY,
+                kind: RxLossKind::SnGap { gap: 2 },
+            }]
+        );
+        assert!(accept(peer, &mut channel, 14));
+        assert_eq!(kinds(peer).len(), 1);
+    }
+
+    /// The first frame after the transport syncs its SNs follows them with a gap of 1, also
+    /// when the peer's initial SN is 0 (BER-2554).
+    #[test]
+    fn the_first_frame_after_sync_reports_nothing() {
+        recorder::install();
+        let mask = crate::common::seq_num::get_mask(Bits::U32);
+        for initial in [0, 1, 1_000, mask] {
+            let peer = ZenohIdProto::rand();
+            let mut channel = channel(1024);
+            channel.sync(initial).unwrap();
+            assert!(accept(peer, &mut channel, initial));
+            assert_eq!(kinds(peer), [], "initial SN {initial}");
+        }
+    }
+
+    /// A repeated or old SN is dropped as before, and reported as no loss.
+    #[test]
+    fn a_repeated_or_old_sn_is_dropped_unreported() {
+        recorder::install();
+        let peer = ZenohIdProto::rand();
+        let mut channel = channel(1024);
+        channel.sync(10).unwrap();
+
+        assert!(accept(peer, &mut channel, 10));
+        assert!(accept(peer, &mut channel, 11));
+        assert!(!accept(peer, &mut channel, 11));
+        assert!(!accept(peer, &mut channel, 9));
+        assert_eq!(kinds(peer), []);
+    }
+
+    /// A message reassembled from its fragments reports nothing.
+    #[test]
+    fn a_reassembled_message_reports_nothing() {
+        recorder::install();
+        let peer = ZenohIdProto::rand();
+        let mut channel = channel(1024);
+        channel.sync(10).unwrap();
+        let msg = push(64, false);
+        let (a, b) = halves(&msg);
+
+        let first = receive_fragment(peer, true, &mut channel, fragment(10, true, true, a));
+        assert!(first.unwrap().is_none());
+        let last = receive_fragment(peer, true, &mut channel, fragment(11, false, false, b));
+        assert_eq!(last.unwrap(), Some(msg));
+        assert_eq!(kinds(peer), []);
+    }
+
+    /// A stop fragment discards the message being reassembled and reports `FragmentDropped`
+    /// (BER-2554).
+    #[test]
+    fn a_stop_fragment_is_reported() {
+        recorder::install();
+        let peer = ZenohIdProto::rand();
+        let mut channel = channel(1024);
+        channel.sync(10).unwrap();
+        let (a, b) = halves(&push(64, false));
+
+        let first = receive_fragment(peer, true, &mut channel, fragment(10, true, true, a));
+        assert!(first.unwrap().is_none());
+        let stop = Fragment {
+            ext_drop: Some(fragment::ext::Drop::new()),
+            ..fragment(11, false, false, b)
+        };
+        assert!(receive_fragment(peer, true, &mut channel, stop)
+            .unwrap()
+            .is_none());
+        assert_eq!(kinds(peer), [RxLossKind::FragmentDropped]);
+    }
+
+    /// A fragment that arrives with no message being reassembled reports
+    /// `FragmentWithoutStart` (BER-2554).
+    #[test]
+    fn a_fragment_without_its_start_is_reported() {
+        recorder::install();
+        let peer = ZenohIdProto::rand();
+        let mut channel = channel(1024);
+        channel.sync(10).unwrap();
+        let (_, b) = halves(&push(64, false));
+
+        let msg = receive_fragment(peer, true, &mut channel, fragment(10, false, false, b));
+        assert!(msg.unwrap().is_none());
+        assert_eq!(kinds(peer), [RxLossKind::FragmentWithoutStart]);
+    }
+
+    /// A message larger than the defragmentation buffer, and bytes that do not decode, report
+    /// `Defragmentation` (BER-2554).
+    #[test]
+    fn a_failed_reassembly_is_reported() {
+        recorder::install();
+        let (a, _) = halves(&push(64, false));
+
+        let peer = ZenohIdProto::rand();
+        let mut small = channel(a.len() - 1);
+        small.sync(10).unwrap();
+        let msg = receive_fragment(peer, true, &mut small, fragment(10, true, true, a));
+        assert!(msg.unwrap().is_none());
+        assert_eq!(kinds(peer), [RxLossKind::Defragmentation]);
+
+        let peer = ZenohIdProto::rand();
+        let mut channel = channel(1024);
+        channel.sync(10).unwrap();
+        let garbage: ZSlice = vec![0xff_u8; 16].into();
+        let msg = receive_fragment(peer, true, &mut channel, fragment(10, true, false, garbage));
+        assert!(msg.unwrap().is_none());
+        assert_eq!(kinds(peer), [RxLossKind::Defragmentation]);
+    }
+
+    /// A sender that runs out of batches part way through a fragmented message abandons it,
+    /// and the receiver reports the loss as a gap at the sender's next frame (BER-2554). The
+    /// stop fragment carries no payload, and a fragment with none does not encode, so it never
+    /// reaches the wire.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_fragment_dropped_mid_message_is_reported() {
+        recorder::install();
+        let mtu: BatchSize = 512;
+        let config = TransmissionPipelineConf {
+            batch: BatchConfig {
+                mtu,
+                is_streamed: false,
+                #[cfg(feature = "transport_compression")]
+                is_compression: false,
+            },
+            queue_size: [1; Priority::NUM],
+            batching_enabled: true,
+            wait_before_drop: Duration::from_millis(1),
+            max_wait_before_drop_fragments: Duration::from_millis(16),
+            wait_before_close: Duration::from_secs(5),
+            batching_time_limit: Duration::from_micros(1),
+            queue_alloc: QueueAllocConf {
+                mode: QueueAllocMode::Init,
+            },
+        };
+        let priorities = (0..Priority::NUM)
+            .map(|_| TransportPriorityTx::make(Bits::U32).unwrap())
+            .collect::<Vec<_>>();
+        let (producer, mut consumer) = TransmissionPipeline::make(config, &priorities, false);
+
+        // The queue's one batch carries the first fragment and is not given back, so the
+        // second fragment finds no batch free.
+        let large = push(4 * mtu as usize, false);
+        assert!(!producer.push_network_message(large.as_ref()).unwrap());
+        let mut batches = vec![];
+        for _ in 0..2 {
+            let (batch, priority) = tokio::time::timeout(TIMEOUT, consumer.pull())
+                .await
+                .unwrap()
+                .unwrap();
+            batches.push(decode(&batch));
+            consumer.refill(batch, priority);
+        }
+        assert!(
+            matches!(&batches[..], [first, stop] if first.len() == 1 && stop.is_empty()),
+            "a first fragment, then a batch the stop fragment did not encode into"
+        );
+        let small = push(8, true);
+        assert!(producer.push_network_message(small.as_ref()).unwrap());
+        let (batch, _) = tokio::time::timeout(TIMEOUT, consumer.pull())
+            .await
+            .unwrap()
+            .unwrap();
+        batches.push(decode(&batch));
+
+        let peer = ZenohIdProto::rand();
+        let mut channel = channel(1 << 20);
+        channel.sync(0).unwrap();
+        let mut delivered = 0;
+        for msg in batches.into_iter().flatten() {
+            match msg.body {
+                TransportBody::Fragment(f) => {
+                    if receive_fragment(peer, true, &mut channel, f)
+                        .unwrap()
+                        .is_some()
+                    {
+                        delivered += 1;
+                    }
+                }
+                TransportBody::Frame(Frame { sn, payload, .. }) => {
+                    if accept(peer, &mut channel, sn) {
+                        delivered += payload.len();
+                    }
+                }
+                body => panic!("unexpected {body:?}"),
+            }
+        }
+        assert_eq!(delivered, 1, "only the small message arrives");
+        assert_eq!(kinds(peer), [RxLossKind::SnGap { gap: 2 }]);
+    }
+
+    fn decode(batch: &WBatch) -> Vec<TransportMessage> {
+        let mut reader = batch.as_slice().reader();
+        let mut msgs = vec![];
+        while reader.can_read() {
+            msgs.push(Zenoh080::new().read(&mut reader).unwrap());
+        }
+        msgs
     }
 }

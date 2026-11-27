@@ -155,7 +155,6 @@ impl SeqNum {
     }
 
     /// Computes the modulo gap between two sequence numbers.
-    #[cfg(test)] // @TODO: remove #[cfg(test)] once reliability is implemented
     pub(crate) fn gap(&self, value: TransportSn) -> ZResult<TransportSn> {
         if (value & !self.mask) != 0 {
             bail!("The sequence number value must be smaller than the resolution");
@@ -259,6 +258,21 @@ mod tests {
         assert!(sn0a.precedes((mask / 2) - 1).unwrap());
         assert!(sn0a.precedes(mask / 2).unwrap());
         assert!(!sn0a.precedes((mask / 2) + 1).unwrap());
+    }
+
+    /// Upstream's `roll` accepts a frame that skips one SN, so a receiver that does not report
+    /// gaps stays compatible with a sender that leaves an SN unused after a drop (BER-2554).
+    #[test]
+    fn sn_roll_accepts_a_skipped_sn() {
+        let mut sn = SeqNum::make(5, Bits::U32).unwrap();
+        assert!(sn.roll(7).unwrap());
+        assert_eq!(sn.get(), 7);
+        assert!(sn.roll(8).unwrap());
+
+        let mask = get_mask(Bits::U32);
+        let mut wrapping = SeqNum::make(mask, Bits::U32).unwrap();
+        assert!(wrapping.roll(1).unwrap());
+        assert_eq!(wrapping.get(), 1);
     }
 
     #[test]

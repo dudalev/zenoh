@@ -2104,6 +2104,38 @@ mod tests {
         );
     }
 
+    /// A link's queue takes up to 64 batches per priority, and refuses more (BER-2554).
+    #[test]
+    fn queue_size_accepts_64_and_refuses_more() {
+        fn size(data: usize) -> String {
+            format!(
+                "{{control: 2, real_time: 2, interactive_high: 2, interactive_low: 2, \
+                 data_high: 2, data: {data}, data_low: 2, background: 2}}"
+            )
+        }
+        fn file(data: usize) -> String {
+            format!(
+                "{{transport: {{link: {{tx: {{queue: {{size: {}}}}}}}}}}}",
+                size(data)
+            )
+        }
+        fn parse(data: usize) -> Option<Config> {
+            Config::from_deserializer(&mut json5::Deserializer::from_str(&file(data)).unwrap()).ok()
+        }
+        const SIZE: &str = "transport/link/tx/queue/size";
+        const DATA: &str = "transport/link/tx/queue/size/data";
+
+        assert_eq!(parse(64).unwrap().get_json(DATA).unwrap(), "64");
+        assert!(parse(65).is_none());
+        assert!(parse(0).is_none());
+
+        let mut config = Config::default();
+        config.insert_json5(SIZE, &size(64)).unwrap();
+        assert_eq!(config.get_json(DATA).unwrap(), "64");
+        assert!(config.insert_json5(SIZE, &size(65)).is_err());
+        assert_eq!(config.get_json(DATA).unwrap(), "64");
+    }
+
     #[test]
     fn insert_remove_json5_array_item_by_id() {
         let mut config = Config::default();

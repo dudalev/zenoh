@@ -62,9 +62,11 @@ impl TransportChannelRx {
     }
 
     pub(crate) fn sync(&mut self, sn: TransportSn) -> ZResult<()> {
-        // Set the sequence number in the state as it had received a message with sn - 1
+        // Set the sequence number in the state as it had received a message with sn - 1, so
+        // that the first frame follows it with a gap of 1 (BER-2554). `resolution()` is the
+        // mask, which is the largest SN and so the one before 0.
         let sn = if sn == 0 {
-            self.sn.resolution() - 1
+            self.sn.resolution()
         } else {
             sn - 1
         };

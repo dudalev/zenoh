@@ -70,6 +70,22 @@ yet at the commit that introduced the table.
   every cached route and only then finalizes its pending queries. Upstream left a closed peer
   in the routes of a peer that had not yet had its answer to the initial interest, so the next
   query waited out its timeout there.
+* **A dropped message is reported to the sender and to the receiver** (BER-2554), through
+  `zenoh::drop_observer`, under `unstable`. A push a face's transport does not queue reaches
+  the sending process's push drop observer, with the face's ZenohId, the key expression, the
+  priority and whether the transport discarded it or had closed. A sender that drops a message
+  leaves one frame SN unused at its next frame on that priority and reliability, so the
+  receiver sees a gap, and the receiving process's rx loss observer reports it with the peer's
+  ZenohId; it also reports the fragments a unicast receive path discards. The wire protocol is
+  unchanged: a receiver that does not report gaps accepts one, as upstream's does. Two
+  upstream SN slips that would read as gaps are fixed: the first frame after a transport opens
+  read as a gap of 2 when the peer's initial SN was 0, and a fragmented message abandoned part
+  way left its stop fragment's SN unused, because a stop fragment has no payload and so never
+  encodes. A link's queue takes up to 64 batches per priority, still allocated lazily. Not
+  covered: the sender's observer sees pushes only, not requests or replies; a push an
+  interceptor refuses reaches neither observer; the multicast receive path reports nothing; a
+  drop the sender never follows with a frame on that channel never reaches the receiver; and
+  a drop for want of a link leaves no pipeline to carry the gap.
 * **One upstream fix carried**, [#2862](https://github.com/eclipse-zenoh/zenoh/pull/2862),
   under two criteria: it has a test that fails here, and it is reachable by what we run. That
   PR is OPEN and unreviewed upstream -- it is not accepted code.

@@ -20,6 +20,8 @@ pub(crate) mod bytes;
 pub(crate) mod cancellation;
 pub(crate) mod config;
 pub(crate) mod connectivity;
+#[cfg(feature = "unstable")]
+pub(crate) mod drop_observer;
 pub(crate) mod encoding;
 pub(crate) mod handlers;
 pub(crate) mod info;

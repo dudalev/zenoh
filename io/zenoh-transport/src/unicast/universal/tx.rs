@@ -194,6 +194,7 @@ impl TransportUnicastUniversal {
             {
                 #[cfg(feature = "stats")]
                 stats.tx_observe_congestion(msg);
+                pipeline.report_drop(msg);
                 return Ok(false);
             };
             let transport = self.clone();

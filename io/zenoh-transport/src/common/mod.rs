@@ -15,6 +15,7 @@ pub mod batch;
 pub(crate) mod defragmentation;
 #[cfg(feature = "shared-memory")]
 pub(crate) mod exit;
+pub mod loss;
 pub(crate) mod pipeline;
 pub(crate) mod priority;
 pub(crate) mod seq_num;

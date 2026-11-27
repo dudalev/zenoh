@@ -360,6 +360,25 @@ impl StageIn {
         // Lock the channel. We are the only one that will be writing on it.
         let mut tch = self.mutex.channel(msg.is_reliable());
 
+        // A message dropped on this channel since its last frame leaves one SN unused, so that
+        // the receiver sees a gap (BER-2554). A message that is not sent either restores
+        // `restore_sn` and re-arms the skip it took.
+        let restore_sn = tch.sn.now();
+        let skipped = c_guard
+            .status
+            .take_skip(c_guard.prioflag, msg.is_reliable());
+        if skipped {
+            tch.sn.get();
+        }
+        macro_rules! restore_sn {
+            () => {{
+                tch.sn.set(restore_sn).unwrap();
+                if skipped {
+                    c_guard.status.arm_skip(c_guard.prioflag, msg.is_reliable());
+                }
+            }};
+        }
+
         // Retrieve the next SN
         let sn = tch.sn.get();
 
@@ -380,7 +399,7 @@ impl StageIn {
         if !batch.is_empty() {
             // Move out existing batch
             self.s_out.move_batch(batch);
-            batch = zgetbatch_rets!(tch.sn.set(sn).unwrap());
+            batch = zgetbatch_rets!(restore_sn!());
         }
 
         // Attempt a second serialization on fully empty batch
@@ -415,14 +434,24 @@ impl StageIn {
             batch = zgetbatch_rets!({
                 // If no fragment has been sent, the sequence number is just reset
                 if fragment.ext_first.is_some() {
-                    tch.sn.set(sn).unwrap()
-                // Otherwise, an ephemeral batch is created to send the stop fragment
+                    restore_sn!()
+                // Otherwise, an ephemeral batch is created to send the stop fragment, which
+                // takes the SN reserved for the next fragment
                 } else {
                     let mut batch = Box::new(WBatch::new_ephemeral(self.batch_config));
                     self.fragbuf.clear();
                     fragment.ext_drop = Some(fragment::ext::Drop::new());
-                    let _ = batch.encode((&mut self.fragbuf.reader(), &mut fragment));
+                    let encoded = batch
+                        .encode((&mut self.fragbuf.reader(), &mut fragment))
+                        .is_ok();
                     self.s_out.move_batch(batch);
+                    // A stop fragment has no payload, and a fragment with none does not
+                    // encode. Its SN is given back, so that a gap at the receiver means a
+                    // message was lost, and not one that was then sent again in full
+                    // (BER-2554).
+                    if !encoded {
+                        tch.sn.set(fragment.sn).unwrap();
+                    }
                 }
             });
 
@@ -436,8 +465,15 @@ impl StageIn {
                     self.s_out.move_batch(batch);
                 }
                 Err(_) => {
-                    // Restore the sequence number
-                    tch.sn.set(sn).unwrap();
+                    // With no fragment sent, the SNs are given back and one is left unused
+                    // for the drop. With fragments sent, the SN reserved for the next one is
+                    // left unused: going back below the sent ones would have the receiver
+                    // drop the next frames as old. Either way the receiver sees a gap
+                    // (BER-2554).
+                    if fragment.ext_first.is_some() {
+                        tch.sn.set(restore_sn).unwrap();
+                        c_guard.status.arm_skip(c_guard.prioflag, msg.is_reliable());
+                    }
                     // Reinsert the batch
                     c_guard.batch = Some(batch);
                     tracing::warn!(
@@ -696,6 +732,8 @@ impl TransmissionPipeline {
             disabled: AtomicBool::new(false),
             congested: AtomicU8::new(0),
             pending: AtomicU8::new(0),
+            skip_reliable: AtomicU8::new(0),
+            skip_best_effort: AtomicU8::new(0),
             waits: Waits {
                 wait_before_drop: config.wait_before_drop,
                 max_wait_before_drop_fragments: config.max_wait_before_drop_fragments,
@@ -812,6 +850,10 @@ struct TransmissionPipelineStatus {
     congested: AtomicU8,
     // Bitflags to indicate the given priority queue has messages waiting to be sent
     pending: AtomicU8,
+    // Bitflags, per priority queue, to indicate a message was dropped on that queue's reliable
+    // or best-effort channel and the next frame there is to leave one SN unused (BER-2554).
+    skip_reliable: AtomicU8,
+    skip_best_effort: AtomicU8,
     // wait parameters
     // Note: this is placed here to optimize TransmissionPipelineProducer memory layout and improve performance
     waits: Waits,
@@ -849,6 +891,26 @@ impl TransmissionPipelineStatus {
         }
         Some(Priority::try_from(prio as u8).unwrap())
     }
+
+    fn skip_flags(&self, is_reliable: bool) -> &AtomicU8 {
+        if is_reliable {
+            &self.skip_reliable
+        } else {
+            &self.skip_best_effort
+        }
+    }
+
+    fn arm_skip(&self, prioflag: u8, is_reliable: bool) {
+        self.skip_flags(is_reliable)
+            .fetch_or(prioflag, Ordering::Relaxed);
+    }
+
+    // The load keeps a read-modify-write off the path of a frame that has nothing to skip.
+    fn take_skip(&self, prioflag: u8, is_reliable: bool) -> bool {
+        let flags = self.skip_flags(is_reliable);
+        flags.load(Ordering::Relaxed) & prioflag != 0
+            && flags.fetch_and(!prioflag, Ordering::Relaxed) & prioflag != 0
+    }
 }
 
 #[derive(Clone)]
@@ -879,18 +941,15 @@ impl TransmissionPipelineProducer {
         if self.status.is_disabled() {
             return Err(TransportClosed);
         }
-        // If the queue is not QoS, it means that we only have one priority with index 0.
-        let (idx, priority) = if self.stage_in.len() > 1 {
-            let priority = msg.priority();
-            (priority as usize, priority)
-        } else {
-            (0, Priority::DEFAULT)
-        };
+        let (idx, priority) = self.queue(msg);
+        // Every drop below leaves one SN unused at the next frame on its channel (BER-2554).
+        let prioflag = 1 << (idx as u8);
 
         // If message is droppable, compute a deadline after which the sample could be dropped
         let (wait_time, max_wait_time) = if msg.is_droppable() {
             // Checked if we are blocked on the priority queue and we drop directly the message
             if self.status.is_congested(priority) {
+                self.status.arm_skip(prioflag, msg.is_reliable());
                 return Ok(false);
             }
             (
@@ -905,6 +964,7 @@ impl TransmissionPipelineProducer {
         let mut queue = zlock!(self.stage_in[idx]);
         // Check again for congestion in case it happens when blocking on the mutex.
         if msg.is_droppable() && self.status.is_congested(priority) {
+            self.status.arm_skip(prioflag, msg.is_reliable());
             return Ok(false);
         }
         let mut sent = queue.push_network_message(msg, priority, &mut deadline)?;
@@ -929,7 +989,29 @@ impl TransmissionPipelineProducer {
             // that means that they would have still been pushed, so we can expect them to
             // be refilled, and they will eventually unset the congested flag.
         }
+        if !sent {
+            self.status.arm_skip(prioflag, msg.is_reliable());
+        }
         Ok(sent)
+    }
+
+    // If the queue is not QoS, it means that we only have one priority with index 0.
+    #[inline]
+    fn queue(&self, msg: NetworkMessageRef) -> (usize, Priority) {
+        if self.stage_in.len() > 1 {
+            let priority = msg.priority();
+            (priority as usize, priority)
+        } else {
+            (0, Priority::DEFAULT)
+        }
+    }
+
+    /// Leaves one SN unused at the next frame on `msg`'s channel, for a message dropped before
+    /// it reached the pipeline, so that the receiver sees a gap (BER-2554).
+    #[cfg(feature = "unstable")]
+    pub(crate) fn report_drop(&self, msg: NetworkMessageRef) {
+        let (idx, _) = self.queue(msg);
+        self.status.arm_skip(1 << (idx as u8), msg.is_reliable());
     }
 
     #[inline]
@@ -1156,8 +1238,8 @@ mod tests {
     use zenoh_codec::{RCodec, Zenoh080};
     use zenoh_config::{QueueAllocConf, QueueAllocMode};
     use zenoh_protocol::{
-        core::{Bits, CongestionControl, Priority},
-        network::{ext, NetworkMessage, Push},
+        core::{Bits, CongestionControl, Priority, Reliability},
+        network::{ext, NetworkBody, NetworkMessage, Push},
         transport::{BatchSize, Fragment, Frame, TransportBody, TransportSn},
     };
     use zenoh_result::ZResult;
@@ -1540,6 +1622,231 @@ mod tests {
             // Second message should be rejected
             assert!(producer.push_network_message(message.as_ref()).is_err());
         }
+
+        Ok(())
+    }
+
+    /// A droppable push of `payload_size` bytes on `priority` and `reliability`.
+    fn droppable(
+        priority: Priority,
+        reliability: Reliability,
+        express: bool,
+        payload_size: usize,
+    ) -> NetworkMessage {
+        NetworkMessage {
+            body: NetworkBody::Push(Push {
+                wire_expr: "test".into(),
+                ext_qos: ext::QoSType::new(priority, CongestionControl::Drop, express),
+                ..Push::from(vec![0_u8; payload_size])
+            }),
+            reliability,
+        }
+    }
+
+    fn push(producer: &TransmissionPipelineProducer, msg: &NetworkMessage) -> bool {
+        producer.push_network_message(msg.as_ref()).unwrap()
+    }
+
+    /// The SN of the first frame or fragment in `batch`.
+    fn first_sn(batch: &WBatch) -> TransportSn {
+        let mut reader = batch.as_slice().reader();
+        let msg: TransportMessage = Zenoh080::new().read(&mut reader).unwrap();
+        match msg.body {
+            TransportBody::Frame(Frame { sn, .. })
+            | TransportBody::Fragment(Fragment { sn, .. }) => sn,
+            body => panic!("expected a frame or a fragment, got {body:?}"),
+        }
+    }
+
+    /// Pushes `msg`, which must be express, and returns the SN its frame took.
+    async fn send(
+        producer: &TransmissionPipelineProducer,
+        consumer: &mut TransmissionPipelineConsumer,
+        msg: &NetworkMessage,
+    ) -> TransportSn {
+        assert!(push(producer, msg), "the push was dropped");
+        let (batch, priority) = timeout(TIMEOUT, consumer.pull()).await.unwrap().unwrap();
+        let sn = first_sn(&batch);
+        consumer.refill(batch, priority);
+        sn
+    }
+
+    /// One SN channel per priority, as a transport with QoS has.
+    fn qos_priorities() -> ZResult<Vec<TransportPriorityTx>> {
+        (0..Priority::NUM)
+            .map(|_| TransportPriorityTx::make(Bits::from(TransportSn::MAX)))
+            .collect()
+    }
+
+    /// A congestion drop leaves exactly one SN unused at the next frame on its channel, and
+    /// nothing is skipped without a drop (BER-2554).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tx_pipeline_drop_leaves_one_sn_unused() -> ZResult<()> {
+        let (producer, mut consumer) =
+            TransmissionPipeline::make(CONFIG_NOT_STREAMED, &qos_priorities()?, false);
+        let msg = droppable(Priority::DEFAULT, Reliability::Reliable, true, 8);
+
+        let first = send(&producer, &mut consumer, &msg).await;
+        assert_eq!(send(&producer, &mut consumer, &msg).await, first + 1);
+
+        // The queue's one batch is held, so a push is dropped at its deadline.
+        assert!(push(&producer, &msg));
+        let (held, priority) = timeout(TIMEOUT, consumer.pull()).await?.unwrap();
+        assert_eq!(first_sn(&held), first + 2);
+        assert!(
+            !push(&producer, &msg),
+            "a push with no batch free must be dropped"
+        );
+        consumer.refill(held, priority);
+        assert_eq!(send(&producer, &mut consumer, &msg).await, first + 4);
+        assert_eq!(send(&producer, &mut consumer, &msg).await, first + 5);
+
+        // A drop on the congested fast path, which takes no lock, leaves one SN unused too.
+        producer.status.set_congested(Priority::DEFAULT, true);
+        assert!(!push(&producer, &msg));
+        assert!(!push(&producer, &msg));
+        producer.status.set_congested(Priority::DEFAULT, false);
+        assert_eq!(
+            send(&producer, &mut consumer, &msg).await,
+            first + 7,
+            "the drops before one frame leave one SN unused, not one each"
+        );
+
+        Ok(())
+    }
+
+    /// A drop leaves an SN unused on its own priority and reliability only (BER-2554).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tx_pipeline_drop_skips_on_its_own_channel_only() -> ZResult<()> {
+        let (producer, mut consumer) =
+            TransmissionPipeline::make(CONFIG_NOT_STREAMED, &qos_priorities()?, false);
+        let dropped = droppable(Priority::Data, Reliability::BestEffort, true, 8);
+        let same_priority = droppable(Priority::Data, Reliability::Reliable, true, 8);
+        let same_reliability = droppable(Priority::DataHigh, Reliability::BestEffort, true, 8);
+
+        let channels = [&dropped, &same_priority, &same_reliability];
+        let mut sns = vec![];
+        for msg in channels {
+            sns.push(send(&producer, &mut consumer, msg).await);
+        }
+
+        producer.status.set_congested(Priority::Data, true);
+        assert!(!push(&producer, &dropped));
+        producer.status.set_congested(Priority::Data, false);
+
+        assert_eq!(
+            send(&producer, &mut consumer, &same_priority).await,
+            sns[1] + 1
+        );
+        assert_eq!(
+            send(&producer, &mut consumer, &same_reliability).await,
+            sns[2] + 1
+        );
+        assert_eq!(send(&producer, &mut consumer, &dropped).await, sns[0] + 2);
+
+        Ok(())
+    }
+
+    /// A message that takes the skip and is then dropped itself gives back the SNs it took and
+    /// re-arms the skip, so the next frame leaves the SN unused instead (BER-2554).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tx_pipeline_restored_sn_rearms_the_skip() -> ZResult<()> {
+        let tct = TransportPriorityTx::make(Bits::from(TransportSn::MAX))?;
+        let (producer, mut consumer) =
+            TransmissionPipeline::make(CONFIG_NOT_STREAMED, std::slice::from_ref(&tct), false);
+        let half = (CONFIG_NOT_STREAMED.batch.mtu / 2) as usize;
+
+        // A batched message holds the queue's one batch.
+        let batched = droppable(Priority::DEFAULT, Reliability::Reliable, false, half);
+        assert!(push(&producer, &batched));
+        producer.status.arm_skip(1, true);
+
+        // The next message does not fit beside it: the batch is moved out, the message takes
+        // the skip and an SN, and finds no batch free.
+        let mut deadline = Deadline::new(Duration::from_millis(1), None);
+        let sent = zlock!(producer.stage_in[0]).push_network_message(
+            batched.as_ref(),
+            Priority::DEFAULT,
+            &mut deadline,
+        )?;
+        assert!(!sent);
+        assert_eq!(
+            zlock!(tct.reliable).sn.now(),
+            1,
+            "the SNs taken are given back"
+        );
+        assert!(
+            producer.status.take_skip(1, true),
+            "the skip taken is re-armed"
+        );
+        producer.status.arm_skip(1, true);
+
+        let (batch, priority) = timeout(TIMEOUT, consumer.pull()).await?.unwrap();
+        assert_eq!(first_sn(&batch), 0);
+        consumer.refill(batch, priority);
+        let express = droppable(Priority::DEFAULT, Reliability::Reliable, true, 8);
+        assert_eq!(send(&producer, &mut consumer, &express).await, 2);
+
+        Ok(())
+    }
+
+    /// A fragmented message abandoned part way, and then sent again in full, starts again at
+    /// the SN after its last fragment sent: the stop fragment does not encode, and gives its
+    /// SN back, so the receiver sees no gap for a message it receives (BER-2554).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tx_pipeline_abandoned_fragments_leave_no_gap() -> ZResult<()> {
+        let config = TransmissionPipelineConf {
+            batch: BatchConfig {
+                mtu: 512,
+                ..CONFIG_NOT_STREAMED.batch
+            },
+            queue_size: [4; Priority::NUM],
+            ..CONFIG_NOT_STREAMED
+        };
+        let (producer, mut consumer) =
+            TransmissionPipeline::make(config, &qos_priorities()?, false);
+        let idx = Priority::DEFAULT as usize;
+        let attempt = |deadline: &mut Deadline, msg: &NetworkMessage| {
+            zlock!(producer.stage_in[idx])
+                .push_network_message(msg.as_ref(), Priority::DEFAULT, deadline)
+                .unwrap()
+        };
+
+        // Three of the four batches are held, so the first attempt sends one fragment and
+        // finds no batch for the second.
+        let small = droppable(Priority::DEFAULT, Reliability::Reliable, true, 8);
+        let mut held = vec![];
+        for sn in 0..3 {
+            assert!(push(&producer, &small));
+            let (batch, priority) = timeout(TIMEOUT, consumer.pull()).await?.unwrap();
+            assert_eq!(first_sn(&batch), sn);
+            held.push((batch, priority));
+        }
+        let large = droppable(Priority::DEFAULT, Reliability::Reliable, false, 1024);
+        let mut deadline = Deadline::new(Duration::from_millis(1), Some(Duration::from_millis(16)));
+        assert!(!attempt(&mut deadline, &large));
+        let (first, priority) = timeout(TIMEOUT, consumer.pull()).await?.unwrap();
+        assert_eq!(first_sn(&first), 3);
+        held.push((first, priority));
+        let (stop, priority) = timeout(TIMEOUT, consumer.pull()).await?.unwrap();
+        assert!(
+            stop.is_ephemeral() && stop.is_empty(),
+            "the stop fragment did not encode"
+        );
+        consumer.refill(stop, priority);
+        for (batch, priority) in held {
+            consumer.refill(batch, priority);
+        }
+
+        let mut deadline = Deadline::new(Duration::from_millis(1), Some(Duration::from_millis(16)));
+        assert!(attempt(&mut deadline, &large));
+        let mut sns = vec![];
+        for _ in 0..3 {
+            let (batch, priority) = timeout(TIMEOUT, consumer.pull()).await?.unwrap();
+            sns.push(first_sn(&batch));
+            consumer.refill(batch, priority);
+        }
+        assert_eq!(sns, [4, 5, 6]);
 
         Ok(())
     }

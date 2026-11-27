@@ -851,6 +851,29 @@ pub mod qos {
     pub use crate::api::publisher::Priority;
 }
 
+/// Observers of the messages a process's transports drop (BER-2554).
+///
+/// A push dropped for congestion reaches two observers, one in each process:
+///
+/// * the sender's [`set_push_drop_observer`](drop_observer::set_push_drop_observer), called
+///   for each face whose transport did not queue the push;
+/// * the receiver's [`set_rx_loss_observer`](drop_observer::set_rx_loss_observer), called with
+///   [`RxLossKind::SnGap`](drop_observer::RxLossKind::SnGap) when the next frame on that channel
+///   arrives. The sender leaves one frame SN unused after a drop, and that is the whole of the
+///   signal: the wire protocol is unchanged, and a receiver that predates it accepts the gap.
+///
+/// The receiver hears of a drop only when the sender next sends a frame on the same priority
+/// and reliability, and the drops between two frames make one gap of 2, however many messages
+/// they cover. Only unicast transports report receive-side losses.
+#[zenoh_macros::unstable]
+pub mod drop_observer {
+    pub use zenoh_transport::common::loss::RxLossKind;
+
+    pub use crate::api::drop_observer::{
+        set_push_drop_observer, set_rx_loss_observer, PushDrop, PushDropReason, RxLoss,
+    };
+}
+
 /// # Scouting primitives
 ///
 /// Scouting is the process of discovering Zenoh nodes in the network.

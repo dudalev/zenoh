@@ -265,7 +265,9 @@ impl Default for LinkTxConf {
 
 impl QueueSizeConf {
     pub const MIN: usize = 1;
-    pub const MAX: usize = 16;
+    // Batches are allocated lazily by default, so a queue holds only the batches it has needed
+    // (BER-2554). A power of two: it is the length of the pipeline's ring buffers.
+    pub const MAX: usize = 64;
 }
 
 impl Default for QueueSizeConf {

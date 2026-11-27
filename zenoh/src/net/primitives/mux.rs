@@ -28,6 +28,8 @@ use zenoh_protocol::{
 use zenoh_transport::{multicast::TransportMulticast, unicast::TransportUnicast};
 
 use super::{EPrimitives, Primitives};
+#[cfg(feature = "unstable")]
+use crate::api::drop_observer::{self, PushDropReason};
 use crate::net::routing::{
     dispatcher::face::{Face, WeakFace},
     gateway::{InterceptorCacheValueType, Resource},
@@ -71,6 +73,27 @@ impl Mux {
     #[inline(always)]
     fn schedule(&self, mut msg: NetworkMessageMut) -> bool {
         self.can_schedule(&mut msg) && self.handler.schedule(msg).unwrap_or(false)
+    }
+
+    /// Reports a push its transport did not queue to the push drop observer (BER-2554).
+    #[cfg(feature = "unstable")]
+    fn observe_push(&self, msg: &NetworkMessageMut, sent: &zenoh_result::ZResult<bool>) {
+        let Some(reason) = PushDropReason::of(sent) else {
+            return;
+        };
+        if !drop_observer::is_push_drop_observed() {
+            return;
+        }
+        let zid = match self.face.get().and_then(|f| f.upgrade()) {
+            Some(face) => Some(face.state.zid),
+            None => self.handler.get_zid().ok(),
+        };
+        let ctx = MuxContext {
+            mux: self,
+            cache: OnceCell::new(),
+            expr: OnceCell::new(),
+        };
+        drop_observer::report_push_drop(zid, ctx.full_expr(msg), msg.priority(), reason);
     }
 }
 
@@ -176,11 +199,17 @@ impl EPrimitives for Mux {
     }
 
     fn send_push(&self, msg: &mut Push, reliability: Reliability) -> bool {
-        let msg = NetworkMessageMut {
+        let mut msg = NetworkMessageMut {
             body: NetworkBodyMut::Push(msg),
             reliability,
         };
-        self.schedule(msg)
+        if !self.can_schedule(&mut msg) {
+            return false;
+        }
+        let sent = self.handler.schedule(msg.as_mut());
+        #[cfg(feature = "unstable")]
+        self.observe_push(&msg, &sent);
+        sent.unwrap_or(false)
     }
 
     fn send_request(&self, msg: &mut Request) -> bool {
@@ -259,6 +288,28 @@ impl McastMux {
     #[inline(always)]
     fn schedule(&self, mut msg: NetworkMessageMut) -> bool {
         self.can_schedule(&mut msg) && self.handler.schedule(msg).unwrap_or(false)
+    }
+
+    /// Reports a push its transport did not queue to the push drop observer (BER-2554).
+    #[cfg(feature = "unstable")]
+    fn observe_push(&self, msg: &NetworkMessageMut, sent: &zenoh_result::ZResult<bool>) {
+        let Some(reason) = PushDropReason::of(sent) else {
+            return;
+        };
+        if !drop_observer::is_push_drop_observed() {
+            return;
+        }
+        let ctx = McastMuxContext {
+            mux: self,
+            cache: OnceCell::new(),
+            expr: OnceCell::new(),
+        };
+        drop_observer::report_push_drop(
+            self.face.get().map(|f| f.state.zid),
+            ctx.full_expr(msg),
+            msg.priority(),
+            reason,
+        );
     }
 }
 
@@ -368,11 +419,17 @@ impl EPrimitives for McastMux {
     }
 
     fn send_push(&self, msg: &mut Push, reliability: Reliability) -> bool {
-        let msg = NetworkMessageMut {
+        let mut msg = NetworkMessageMut {
             body: NetworkBodyMut::Push(msg),
             reliability,
         };
-        self.schedule(msg)
+        if !self.can_schedule(&mut msg) {
+            return false;
+        }
+        let sent = self.handler.schedule(msg.as_mut());
+        #[cfg(feature = "unstable")]
+        self.observe_push(&msg, &sent);
+        sent.unwrap_or(false)
     }
 
     fn send_request(&self, msg: &mut Request) -> bool {
