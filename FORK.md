@@ -161,10 +161,14 @@ yet at the commit that introduced the table.
     Only a stage's own batches enter its rings, so a ring the length of the cap cannot
     overflow. A size outside 1..=64 set on its own, which the config's validator does not
     see, fails the transport manager's build, so the session does not open.
-  * **Two links in one transport.** Two peers that list each other in `connect` can still end
-    up with two links in one transport at `max_links` 1, when each accepts the other's dial
-    before its own dial completes: an accepted dial is refused beside another link, but a
-    dial that completes beside an accepted one is kept. Peers with no `connect` get one link. A link that fails beside another reports what it held as
+  * **Two links in one transport.** Two peers that dial each other, through `connect` or
+    through scouting's autoconnect, can still end up with two links in one transport at
+    `max_links` 1, when each accepts the other's dial before its own dial completes: an
+    accepted dial is refused beside another link, but a dial that completes beside an
+    accepted one is kept. Under scouting this is common among peers that start together. A
+    refused dial means the pair is already connected; scouting does not redial a peer it has
+    a transport to, and a configured connector retries on its period while the other link
+    lives. A link that fails beside another reports what it held as
     `LinkClosedQueued`, a push it refuses is `Dropped`, and the receiver sees the gap on the
     other link. In that state the writer cannot tell a dying peer from a live one: a dying
     peer's write failures read as a live reader's loss, `LinkClosedQueued`, and at high rates
