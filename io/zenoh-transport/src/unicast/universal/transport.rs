@@ -26,7 +26,7 @@ use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 use zenoh_core::{zasynclock, zcondfeat, zread, zwrite};
 use zenoh_link::{Link, LinkUnicast};
 use zenoh_protocol::{
-    core::{Bound, Priority, RegionName, WhatAmI, ZenohIdProto},
+    core::{Bound, Priority, RegionName, Reliability, WhatAmI, ZenohIdProto},
     network::NetworkMessageMut,
     transport::{close, Close, PrioritySn, TransportMessage, TransportSn},
 };
@@ -36,6 +36,7 @@ use zenoh_result::{bail, zerror, ZResult};
 use crate::common::shm::shm_context::UnicastTransportShmContext;
 use crate::{
     common::{
+        loss::{self, LocalClose, RxLossKind},
         pipeline::TransmissionPipelineProducer,
         priority::{TransportPriorityRx, TransportPriorityTx},
     },
@@ -197,6 +198,17 @@ impl TransportUnicastUniversal {
     }
 
     pub(crate) async fn del_link(&self, link: Link) -> ZResult<()> {
+        self.del_link_closed_by(link, None).await
+    }
+
+    /// Removes `link`, which `local_close` closed at this end if given. Whether it was the
+    /// transport's last link is decided under the lock that removes it, so that of links closed
+    /// together exactly the last reports the local close (BER-2627).
+    pub(crate) async fn del_link_closed_by(
+        &self,
+        link: Link,
+        local_close: Option<LocalClose>,
+    ) -> ZResult<()> {
         // Remove the link and, if it was the last one, mark the transport as closed in one step,
         // under the status lock. Otherwise, until delete() below marks it closed (after the
         // callback, which can be slow), the transport stays in the manager as alive with no link:
@@ -215,6 +227,14 @@ impl TransportUnicastUniversal {
             *status_guard = TransportStatus::Closed;
         }
         drop(status_guard);
+        if let (true, Some(reason)) = (is_last, local_close) {
+            loss::report(
+                self.config.zid,
+                Priority::Control,
+                Reliability::Reliable,
+                RxLossKind::TransportClosedLocally { reason },
+            );
+        }
 
         // Notify the callback.
         //
@@ -329,16 +349,26 @@ impl TransportUnicastTrait for TransportUnicastUniversal {
 
         // Check if we can add more inbound links
         if let TransportLinkUnicastDirection::Inbound = link.inner_config().direction {
-            let limit = zcondfeat!(
+            let multilink_limit: Option<usize> = zcondfeat!(
                 "transport_multilink",
-                match self.config.multilink {
-                    Some(_) => self.manager.config.unicast.max_links,
-                    None => 1,
-                },
-                1
+                self.config
+                    .multilink
+                    .as_ref()
+                    .map(|_| self.manager.config.unicast.max_links),
+                None
             );
-
-            let count = guard.nb_links_multilink(TransportLinkUnicastDirection::Inbound);
+            let (limit, count) = match multilink_limit {
+                Some(limit) => (
+                    limit,
+                    guard.nb_links_multilink(Some(TransportLinkUnicastDirection::Inbound)),
+                ),
+                // Without multilink nothing tells a link of this transport from one of a new
+                // transport the peer opened after closing its side of this one, whose SNs start
+                // again, so a link the peer dials beside any other is refused. A peer that holds
+                // this transport goes on with it, and one that opened a new transport has its
+                // dial succeed once this one has closed (BER-2625).
+                None => (1, guard.nb_links_multilink(None)),
+            };
             if count >= limit {
                 let e = zerror!(
                     "Can not add Link {} with peer {}: max num of links reached ({}/{})",
@@ -620,13 +650,18 @@ impl TransportLinks {
             .collect()
     }
 
-    fn nb_links_multilink(&self, direction: TransportLinkUnicastDirection) -> usize {
+    /// The links in `direction`, or in both if `None`.
+    fn nb_links_multilink(&self, direction: Option<TransportLinkUnicastDirection>) -> usize {
         // Do not count AssociatedLink: pairs of (Link, AssociatedLink) must count as only one for
         // multilink limit.
         self.inner
             .iter()
             .filter(|l| {
-                matches!(l, TransportLinkMarker::Link(_)) && l.link.config.direction == direction
+                matches!(l, TransportLinkMarker::Link(_))
+                    && match direction {
+                        Some(direction) => l.link.config.direction == direction,
+                        None => true,
+                    }
             })
             .count()
     }

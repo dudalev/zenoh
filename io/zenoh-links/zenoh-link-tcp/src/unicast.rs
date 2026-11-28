@@ -13,7 +13,7 @@
 //
 #[cfg(all(feature = "uring", target_os = "linux"))]
 use std::os::fd::{AsRawFd, RawFd};
-use std::{cell::UnsafeCell, convert::TryInto, fmt, net::SocketAddr, sync::Arc, time::Duration};
+use std::{cell::UnsafeCell, fmt, net::SocketAddr, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use tokio::{
@@ -33,10 +33,7 @@ use zenoh_protocol::{
 };
 use zenoh_result::{bail, zerror, Error as ZError, ZResult};
 
-use crate::{
-    utils::TcpLinkConfig, TCP_ACCEPT_THROTTLE_TIME, TCP_DEFAULT_MTU, TCP_LINGER_TIMEOUT,
-    TCP_LOCATOR_PREFIX,
-};
+use crate::{utils::TcpLinkConfig, TCP_ACCEPT_THROTTLE_TIME, TCP_DEFAULT_MTU, TCP_LOCATOR_PREFIX};
 
 pub struct LinkUnicastTcp {
     // The underlying socket as returned from the tokio library
@@ -65,18 +62,9 @@ impl LinkUnicastTcp {
             );
         }
 
-        // Set the TCP linger option
-        #[allow(deprecated)]
-        if let Err(err) = socket.set_linger(Some(Duration::from_secs(
-            (*TCP_LINGER_TIMEOUT).try_into().unwrap(),
-        ))) {
-            tracing::warn!(
-                "Unable to set LINGER option on TCP link {} => {}: {}",
-                src_addr,
-                dst_addr,
-                err
-            );
-        }
+        // No SO_LINGER: a lingering close holds the thread that drops the socket, a runtime's,
+        // until the peer has acknowledged every byte, and then finishes in the background as a
+        // close without it does at once, so it delivers nothing more (BER-2626).
 
         // Compute the MTU
         // See IETF RFC6691: https://datatracker.ietf.org/doc/rfc6691/

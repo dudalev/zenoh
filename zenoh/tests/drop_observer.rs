@@ -862,6 +862,121 @@ async fn a_failed_link_does_not_stall_the_other_links() {
     sessions.close().await;
 }
 
+/// A transport this process closes to a peer that is alive but not reading does not hold up
+/// its other links while the socket closes, with what the peer has not read still in it: a
+/// healthy subscriber of the same publisher, on a link its process dialled, keeps receiving.
+/// The proxy stays stopped throughout, so a close that waited for the peer to read would wait
+/// for as long as it lingers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_close_to_a_peer_that_is_not_reading_does_not_stall_the_other_links() {
+    zenoh::init_log_from_env_or("error");
+    install_observers();
+    const DATA: &str = "test/drop_observer/closing/data";
+    const BLOCKED: &str = "test/drop_observer/closing/blocked";
+    let mut sessions = TestSessions::new();
+    let mut listener = sessions.get_listener_config(
+        &format!("tcp/127.0.0.1:0#so_sndbuf={SOCKET_BUFFER};so_rcvbuf={SOCKET_BUFFER}"),
+        1,
+    );
+    listener
+        .insert_json5(
+            "transport/link/tx/queue/congestion_control/block/wait_before_close",
+            "300000",
+        )
+        .unwrap();
+    listener
+        .insert_json5("transport/link/tx/queue/size/data", "16")
+        .unwrap();
+    let publishing = sessions.open_listener_with_cfg(listener).await;
+    let healthy = sessions.open_connector().await;
+    let proxy = Proxy::start(&get_tcp_locator(&publishing).await);
+    let stalled = sessions
+        .open_connector_with_cfg(
+            sessions.get_connector_config_with_endpoint(vec![proxy.endpoint.clone()]),
+        )
+        .await;
+
+    let healthy_received = Arc::new(AtomicUsize::new(0));
+    let _healthy_subscriber = ztimeout!(healthy.declare_subscriber(DATA).callback({
+        let received = healthy_received.clone();
+        move |_| {
+            received.fetch_add(1, Ordering::SeqCst);
+        }
+    }))
+    .unwrap();
+    let _stalled_subscriber =
+        ztimeout!(stalled.declare_subscriber(BLOCKED).callback(|_| {})).unwrap();
+    let blocking = ztimeout!(publishing
+        .declare_publisher(BLOCKED)
+        .congestion_control(CongestionControl::Block)
+        .reliability(Reliability::Reliable))
+    .unwrap();
+    wait_matching(&blocking).await;
+    let publisher = ztimeout!(publishing
+        .declare_publisher(DATA)
+        .congestion_control(CongestionControl::Drop)
+        .reliability(Reliability::Reliable))
+    .unwrap();
+    wait_matching(&publisher).await;
+
+    // About 1,000 small puts a second, which the healthy subscriber keeps up with.
+    let streaming = Arc::new(AtomicBool::new(true));
+    let stream = std::thread::spawn({
+        let streaming = streaming.clone();
+        move || {
+            while streaming.load(Ordering::SeqCst) {
+                publisher.put(vec![0_u8; 64]).wait().unwrap();
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    });
+    wait_until("the healthy subscriber receives", || {
+        healthy_received.load(Ordering::SeqCst) > 0
+    })
+    .await;
+
+    // Blocking puts fill the stopped link until one waits out `wait_before_close`, and the
+    // publisher's zenoh closes the transport, with the link's socket full.
+    proxy.stalled.store(true, Ordering::SeqCst);
+    let putting = std::thread::spawn({
+        let peer = stalled.zid();
+        move || {
+            let start = Instant::now();
+            while !closed_locally(peer, LocalClose::BlockingPushFailed) {
+                assert!(start.elapsed() < TIMEOUT, "no local close reported");
+                blocking.put(vec![0_u8; 8 * PAYLOAD_SIZE]).wait().unwrap();
+            }
+        }
+    });
+    tokio::task::spawn_blocking(move || putting.join().unwrap())
+        .await
+        .unwrap();
+    let start = Instant::now();
+    while ztimeout!(publishing.info().peers_zid()).any(|zid| zid == stalled.zid()) {
+        assert!(start.elapsed() < TIMEOUT, "the transport was not closed");
+        tokio::time::sleep(POLL).await;
+    }
+
+    let before = healthy_received.load(Ordering::SeqCst);
+    let start = Instant::now();
+    while healthy_received.load(Ordering::SeqCst) < before + 100 {
+        assert!(
+            start.elapsed() < Duration::from_millis(2_500),
+            "the healthy subscriber stalled while the transport closed: {} received",
+            healthy_received.load(Ordering::SeqCst) - before
+        );
+        tokio::time::sleep(POLL).await;
+    }
+    streaming.store(false, Ordering::SeqCst);
+    tokio::task::spawn_blocking(move || stream.join().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(push_drops_to(healthy.zid()), []);
+
+    proxy.kill();
+    sessions.close().await;
+}
+
 /// Whether the rx loss observer has reported a local close of the transport to `peer`.
 fn closed_locally(peer: ZenohId, reason: LocalClose) -> bool {
     rx_losses_from(peer).iter().any(|loss| {

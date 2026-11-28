@@ -111,13 +111,45 @@ yet at the commit that introduced the table.
     replaces it starts its SNs afresh. The reasons are a lease that expired on the
     transport's last link, and a push of this process's that may not be dropped finding no
     batch before `wait_before_close`, or not fitting the link's batches even as fragments;
-    that is any blocking push, a publisher's or a reply. Not reported: the peer's Close
-    message, a connection the peer's end closed or reset, and this process closing its own
-    session. Which side sees what: a link stopped in both directions expires both leases, and
-    both sides report; a reader whose receive thread is held by its own callback keeps its
-    peer's lease alive, and reports the gap when it reads again; a reader whose whole process
-    stops past the writer's lease is reported by the writer, and on resuming sees a reset,
-    which it does not report.
+    that is any blocking push, a publisher's or a reply. Whether an expired link was the last
+    is decided under the lock that removes it, so of links that expire together the last one
+    reports, once. Not reported: the peer's Close message, a connection the peer's end closed
+    or reset, and this process closing its own session. A receive task reads what has
+    arrived before it checks the lease, and a lease timeout seen before a read is not one.
+    Which side sees what: a link stopped in both directions expires both leases, and both
+    sides report; a reader whose receive task its own callback holds, for however long,
+    reads what waited once released, so it keeps a live peer's transport and reports the gap
+    if there is one, and sees a closing peer's close, which it does not report; a reader
+    whose whole process stops past the writer's lease is reported by the writer, and on
+    resuming either reads the end of the connection first, which it does not report, or
+    finds its own lease expired first and reports that, depending on whether its runtimes
+    see the socket's bytes or the lease timer first after the stop. On the uring receive
+    path, which the consumer does not build, a callback that holds the link past its lease
+    expires it.
+  * **Upstream defect, fixed: a peer's new transport joined to the old one.** Without
+    multilink, a link the peer dials is refused beside any other link of the transport,
+    where upstream refused it only beside another link the peer had dialled. A peer that
+    closed its side of a transport and dialled again while this side still held the old one,
+    its receive task held so that it had not read the close, had its new link joined to the
+    old transport. The initial SN comes from the two ZenohIds, so the new transport's SNs
+    started at or below what the old one had received, and its frames were dropped as old,
+    with no report. The dial is now refused until the old transport has closed, and then
+    opens a fresh one. A configured connector whose dial is refused retries as its retry
+    configuration says.
+  * **Upstream defect, fixed: a lingering close froze the process's dialled links.** TCP and
+    TLS links no longer set `SO_LINGER`, which upstream set to 10 s. On Linux a lingering
+    `close()` only blocks the thread that drops the socket until the peer has acknowledged
+    every byte and the FIN, and when the time runs out the kernel finishes the close in the
+    background, as it does at once without the linger: measured on this host, a peer that
+    resumed reading after the close read every byte and the end of the stream either way,
+    and only the time `close()` blocked differed. The thread was the Net runtime's one
+    thread, whose reactor serves every link the process dialled, so a transport closed to a
+    peer that was not reading froze all of them for as long as the linger lasted, and a
+    healthy reader of the same writer missed what was dropped meanwhile. The test closes a
+    transport to a stopped proxy while a healthy subscriber, on a link its process dialled,
+    is streamed to, and requires the subscriber to keep receiving; with the linger back, it
+    received nothing. The test is over TCP; the same change to TLS, which the consumer does
+    not build, is not tested.
   * **Upstream SN slips that would read as gaps, fixed:** the first frame after a transport
     opens read as a gap of 2 when the peer's initial SN was 0; every fragmented message took
     an SN after its last fragment, so the frame after it read as a gap; a fragmented message
@@ -129,10 +161,10 @@ yet at the commit that introduced the table.
     Only a stage's own batches enter its rings, so a ring the length of the cap cannot
     overflow. A size outside 1..=64 set on its own, which the config's validator does not
     see, fails the transport manager's build, so the session does not open.
-  * **Two links in one transport.** Two peers that list each other in `connect` can end up
-    with two links in one transport, even at `max_links` 1, since upstream counts only inbound
-    links against it; they need not start at once, a few seconds apart does it too. Peers
-    with no `connect` get one link. A link that fails beside another reports what it held as
+  * **Two links in one transport.** Two peers that list each other in `connect` can still end
+    up with two links in one transport at `max_links` 1, when each accepts the other's dial
+    before its own dial completes: an accepted dial is refused beside another link, but a
+    dial that completes beside an accepted one is kept. Peers with no `connect` get one link. A link that fails beside another reports what it held as
     `LinkClosedQueued`, a push it refuses is `Dropped`, and the receiver sees the gap on the
     other link. In that state the writer cannot tell a dying peer from a live one: a dying
     peer's write failures read as a live reader's loss, `LinkClosedQueued`, and at high rates

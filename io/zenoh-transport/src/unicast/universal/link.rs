@@ -52,9 +52,9 @@ use zenoh_buffers::{
     buffer::Buffer,
     reader::{BacktrackableReader, HasReader},
 };
-use zenoh_link::{Link, LinkUnicast};
+use zenoh_link::Link;
 use zenoh_protocol::{
-    core::{Priority, Reliability},
+    core::Priority,
     transport::{KeepAlive, TransportMessage},
 };
 use zenoh_result::{bail, zerror, ZResult};
@@ -82,7 +82,7 @@ use super::transport::TransportUnicastUniversal;
 use crate::{
     common::{
         batch::{BatchConfig, RBatch, WBatch},
-        loss::{self, LocalClose, RxLossKind, TxLossKind},
+        loss::{self, LocalClose, TxLossKind},
         pipeline::{
             PipelineConsumer, TransmissionPipeline, TransmissionPipelineConf,
             TransmissionPipelineConsumer, TransmissionPipelineProducer,
@@ -236,6 +236,7 @@ impl TransportLinkUnicastUniversal {
             if let Err(e) = res {
                 // process error if task was not cancelled
                 tracing::debug!("RX task failed: {}", e);
+                let local_close = local_close_of(&e);
 
                 // Spawn a task to avoid a deadlock waiting for this same task
                 // to finish in the close() joining its handle
@@ -243,7 +244,10 @@ impl TransportLinkUnicastUniversal {
 
                 zenoh_runtime::ZRuntime::RX.spawn(async move {
                     transport
-                        .del_link(Link::new_unicast(&rx.link, priorities, reliability))
+                        .del_link_closed_by(
+                            Link::new_unicast(&rx.link, priorities, reliability),
+                            local_close,
+                        )
                         .await
                 });
 
@@ -389,13 +393,12 @@ async fn write_loop(
         report_unsent(transport, link, Unwritten::WriteFailed, unsent);
         return Err(e);
     }
-    // A batch whose write the close cut short is lost too.
-    let cut = writing;
     if mid_write {
         // A cut write can leave the stream inside a batch, whose rest the reader would take
-        // from the bytes written next: nothing more is written on the link (BER-2554).
+        // from the bytes written next: nothing more is written on the link, and the batch the
+        // close cut short is lost with the rest (BER-2554).
         pipeline.disable();
-        let unsent = cut.into_iter().chain(unsent(pipeline.drain()));
+        let unsent = writing.into_iter().chain(unsent(pipeline.drain()));
         report_unsent(transport, link, Unwritten::NotRead, unsent);
         bail!("{link}: write cut short by the close");
     }
@@ -421,9 +424,7 @@ async fn write_loop(
             )),
         };
         if let Some((unwritten, e)) = unwritten {
-            let unsent = cut
-                .into_iter()
-                .chain(unsent(std::iter::once((b, priority)).chain(batches)));
+            let unsent = unsent(std::iter::once((b, priority)).chain(batches));
             report_unsent(transport, link, unwritten, unsent);
             return Err(e);
         }
@@ -434,7 +435,6 @@ async fn write_loop(
             stats.inc_transport_message(zenoh_stats::Tx, b.stats.t_msgs as u64);
         }
     }
-    report_unsent(transport, link, Unwritten::NotRead, cut);
 
     Ok(())
 }
@@ -493,19 +493,32 @@ fn report_unsent(
     }
 }
 
-/// Reports a lease that expired on the transport's last link, which closes the transport while
-/// its peer may be alive (BER-2554).
-fn report_lease_expiry(transport: &TransportUnicastUniversal, link: &LinkUnicast) {
-    if !transport.has_link_other_than(link) {
-        loss::report(
-            transport.config.zid,
-            Priority::Control,
-            Reliability::Reliable,
-            RxLossKind::TransportClosedLocally {
-                reason: LocalClose::LeaseExpired,
-            },
-        );
+/// The error a link's RX task ends with when nothing arrived from the peer for its lease. The
+/// link is removed as one that expired, which reports a local close if it was the transport's
+/// last (BER-2627).
+#[derive(Debug)]
+struct LeaseExpired {
+    link: String,
+    lease: Duration,
+}
+
+impl std::fmt::Display for LeaseExpired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: expired after {} milliseconds",
+            self.link,
+            self.lease.as_millis()
+        )
     }
+}
+
+impl std::error::Error for LeaseExpired {}
+
+/// What the end of a link's RX task with `e` closes locally.
+fn local_close_of(e: &zenoh_result::Error) -> Option<LocalClose> {
+    e.downcast_ref::<LeaseExpired>()
+        .map(|_| LocalClose::LeaseExpired)
 }
 
 async fn rx_task(
@@ -632,7 +645,11 @@ async fn read_loop<F: Fn() -> Box<[u8]>>(
     }
 
     loop {
+        // What has arrived is read before the lease is checked: a receive task that a callback
+        // held past the lease finds the peer's bytes, or its close, waiting, and the lease runs
+        // again from them (BER-2627).
         tokio::select! {
+            biased;
             batch = read(link, priority, pool) => {
                 let batch = batch?;
                 lease_tracker.reset();
@@ -644,8 +661,11 @@ async fn read_loop<F: Fn() -> Box<[u8]>>(
                 transport.read_messages(batch, link, #[cfg(feature = "stats")] &stats)?;
             }
             _ = lease_tracker.wait_if(priority.unwrap_or(Priority::Control) == Priority::Control) => {
-                report_lease_expiry(&transport, &link.link);
-                bail!("{link}: expired after {} milliseconds", lease_tracker.timeout().as_millis());
+                return Err(LeaseExpired {
+                    link: link.to_string(),
+                    lease: lease_tracker.timeout(),
+                }
+                .into());
             }
         }
     }
@@ -699,6 +719,8 @@ impl TimeoutTracker {
 
     fn reset(&self) {
         *self.0.latest_reset.lock().unwrap() = Instant::now();
+        // A timeout seen before this reset is not one (BER-2627).
+        self.0.has_timed_out.store(false, Ordering::Release);
     }
 
     async fn wait_if(&self, predicate: bool) {
@@ -753,7 +775,6 @@ async fn rx_task_uring(
     let pool = RecyclingObjectPool::new(n, move || vec![0_u8; mtu].into_boxed_slice());
 
     let c_link = link.clone();
-    let expiring = transport.clone();
 
     let batch_config = link.config.batch;
 
@@ -857,6 +878,7 @@ async fn rx_task_uring(
     };
 
     let result = tokio::select! {
+        biased;
         e = uring_read_task.read_error() => {
             tracing::debug!("Uring RX task stopped by uring task error event");
             Err(e)
@@ -865,18 +887,282 @@ async fn rx_task_uring(
             tracing::debug!("Uring RX task stopped by uring finished event: {:?}", finished);
             finished
         }
-        _ = lease_tracker.wait_if(true) => {
-            tracing::debug!("Uring RX task stopped by lease timeout");
-            report_lease_expiry(&expiring, &link.link);
-            bail!("{link}: expired after {} milliseconds", lease.as_millis());
-        }
         _ = cancellation_token.cancelled() => {
             tracing::debug!("Uring RX task stopped by cancellation event");
             Ok(())
+        }
+        _ = lease_tracker.wait_if(true) => {
+            tracing::debug!("Uring RX task stopped by lease timeout");
+            Err(LeaseExpired {
+                link: link.to_string(),
+                lease,
+            }
+            .into())
         }
     };
 
     uring_read_task.stop().await;
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        future::pending,
+        sync::{Arc, Mutex},
+        time::{Duration, Instant},
+    };
+
+    use async_trait::async_trait;
+    use zenoh_codec::{RCodec, Zenoh080};
+    use zenoh_link::{LinkAuthId, LinkUnicast, LinkUnicastTrait};
+    use zenoh_protocol::{
+        core::{Bits, Locator, Priority, WhatAmI, ZenohIdProto},
+        transport::{init::ext::PatchType, BatchSize, TransportBody, TransportMessage},
+    };
+    use zenoh_result::ZResult;
+
+    #[cfg(feature = "auth_usrpwd")]
+    use crate::unicast::establishment::ext::auth::UsrPwdId;
+    #[cfg(feature = "shared-memory")]
+    use crate::unicast::link::TransportLinkShmHandoff;
+    use crate::{
+        common::{batch::BatchConfig, loss::recorder},
+        unicast::{
+            link::{
+                LinkUnicastWithOpenAck, TransportLinkUnicast, TransportLinkUnicastConfig,
+                TransportLinkUnicastDirection,
+            },
+            TransportConfigUnicast, TransportManagerBuilderUnicast, TransportUnicast,
+        },
+        DummyTransportEventHandler, TransportManager,
+    };
+
+    const TIMEOUT: Duration = Duration::from_secs(60);
+    const MTU: BatchSize = 1024;
+
+    /// A streamed link whose every write is held, as a socket whose peer reads nothing holds
+    /// it, and which records the writes cut short and the writes begun after one.
+    struct HeldLink {
+        src: Locator,
+        dst: Locator,
+        state: Mutex<HeldState>,
+    }
+
+    #[derive(Default)]
+    struct HeldState {
+        holding: Option<Vec<u8>>,
+        cut: Vec<Vec<u8>>,
+        begun_after_cut: usize,
+    }
+
+    impl HeldLink {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                src: Locator::new("tcp", "127.0.0.1:1", "").unwrap(),
+                dst: Locator::new("tcp", "127.0.0.1:2", "").unwrap(),
+                state: Mutex::default(),
+            })
+        }
+
+        fn holding(&self) -> Option<TransportBody> {
+            self.state.lock().unwrap().holding.as_deref().map(body)
+        }
+
+        fn cut(&self) -> Vec<TransportBody> {
+            self.state
+                .lock()
+                .unwrap()
+                .cut
+                .iter()
+                .map(|b| body(b))
+                .collect()
+        }
+
+        fn begun_after_cut(&self) -> usize {
+            self.state.lock().unwrap().begun_after_cut
+        }
+    }
+
+    /// The transport message a batch the link wrote begins with.
+    fn body(batch: &[u8]) -> TransportBody {
+        let mut reader = &batch[2..];
+        let message: TransportMessage = Zenoh080::new().read(&mut reader).unwrap();
+        message.body
+    }
+
+    /// Records the held write as cut short, unless it completes.
+    struct Holding<'a>(&'a HeldLink);
+
+    impl Drop for Holding<'_> {
+        fn drop(&mut self) {
+            let mut state = self.0.state.lock().unwrap();
+            if let Some(bytes) = state.holding.take() {
+                state.cut.push(bytes);
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LinkUnicastTrait for HeldLink {
+        fn get_mtu(&self) -> BatchSize {
+            MTU
+        }
+        fn get_src(&self) -> &Locator {
+            &self.src
+        }
+        fn get_dst(&self) -> &Locator {
+            &self.dst
+        }
+        fn is_reliable(&self) -> bool {
+            true
+        }
+        fn is_streamed(&self) -> bool {
+            true
+        }
+        fn get_interface_names(&self) -> Vec<String> {
+            vec![]
+        }
+        fn get_auth_id(&self) -> &LinkAuthId {
+            &LinkAuthId::Tcp
+        }
+        async fn write(&self, buffer: &[u8], priority: Option<Priority>) -> ZResult<usize> {
+            self.write_all(buffer, priority).await?;
+            Ok(buffer.len())
+        }
+        async fn write_all(&self, buffer: &[u8], _priority: Option<Priority>) -> ZResult<()> {
+            {
+                let mut state = self.state.lock().unwrap();
+                if !state.cut.is_empty() {
+                    state.begun_after_cut += 1;
+                }
+                state.holding = Some(buffer.to_vec());
+            }
+            let _holding = Holding(self);
+            pending().await
+        }
+        async fn read(&self, _buffer: &mut [u8], _priority: Option<Priority>) -> ZResult<usize> {
+            pending().await
+        }
+        async fn read_exact(&self, _buffer: &mut [u8], _priority: Option<Priority>) -> ZResult<()> {
+            pending().await
+        }
+        async fn close(&self) -> ZResult<()> {
+            Ok(())
+        }
+        #[cfg(all(feature = "uring", target_os = "linux"))]
+        fn get_fd(&self) -> ZResult<std::os::fd::RawFd> {
+            zenoh_result::bail!("no file descriptor")
+        }
+    }
+
+    /// A transport to peer `n` over `link`, from a manager whose `lease` sets how long the link
+    /// may stay idle before it writes a keep-alive. The peer's lease is long, so the link's
+    /// silence does not expire it.
+    async fn transport_over(
+        n: u8,
+        link: Arc<HeldLink>,
+        lease: Duration,
+    ) -> (TransportManager, TransportUnicast) {
+        let manager = TransportManager::builder()
+            .whatami(WhatAmI::Peer)
+            .zid(ZenohIdProto::try_from([0x4c, n, 1]).unwrap())
+            .unicast(TransportManagerBuilderUnicast::default().lease(lease))
+            .build_test(Arc::new(DummyTransportEventHandler))
+            .unwrap();
+        let config = TransportConfigUnicast {
+            zid: ZenohIdProto::try_from([0x4c, n, 2]).unwrap(),
+            whatami: WhatAmI::Peer,
+            region_name: None,
+            bound: None,
+            sn_resolution: Bits::U32,
+            tx_initial_sn: 0,
+            is_qos: false,
+            #[cfg(feature = "transport_multilink")]
+            multilink: None,
+            #[cfg(feature = "shared-memory")]
+            shm: None,
+            is_lowlatency: false,
+            #[cfg(feature = "auth_usrpwd")]
+            auth_id: UsrPwdId(None),
+            patch: PatchType::CURRENT,
+        };
+        let link = TransportLinkUnicast::new(
+            LinkUnicast::from(link as Arc<dyn LinkUnicastTrait>),
+            TransportLinkUnicastConfig {
+                direction: TransportLinkUnicastDirection::Outbound,
+                batch: BatchConfig {
+                    mtu: MTU,
+                    is_streamed: true,
+                    #[cfg(feature = "transport_compression")]
+                    is_compression: false,
+                },
+                priorities: None,
+                reliability: None,
+            },
+            #[cfg(feature = "shared-memory")]
+            TransportLinkShmHandoff::disabled(),
+        );
+        let transport = manager
+            .init_transport_unicast(
+                config,
+                LinkUnicastWithOpenAck::new(link, None, None),
+                0,
+                TIMEOUT,
+            )
+            .await
+            .unwrap();
+        (manager, transport)
+    }
+
+    async fn wait_until(what: &str, condition: impl Fn() -> bool) {
+        let start = Instant::now();
+        while !condition() {
+            assert!(start.elapsed() < TIMEOUT, "timed out waiting until {what}");
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    /// A close whose own Close the link has begun to write, with nothing else queued, cuts that
+    /// write and reports nothing lost: the batch held no message. The close pushes the Close
+    /// and then ends the link's tasks, so each trial counts only if the write of the Close began
+    /// in between (BER-2628).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_cut_write_of_the_close_alone_reports_no_loss() {
+        recorder::install_tx();
+        for n in 0..40 {
+            let link = HeldLink::new();
+            let (manager, transport) = transport_over(n, link.clone(), TIMEOUT).await;
+            let peer = transport.get_zid().unwrap();
+            transport.close().await.unwrap();
+            let counts = matches!(link.cut()[..], [TransportBody::Close(_)]);
+            manager.close().await;
+            if counts {
+                assert_eq!(recorder::tx_losses_to(peer), []);
+                return;
+            }
+        }
+        panic!("no close cut the write of its Close");
+    }
+
+    /// A keep-alive whose write a close cuts short ends the link's writes as a batch's does:
+    /// the link begins no other write, not even of the Close (BER-2628).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_cut_keep_alive_ends_the_link_writes() {
+        recorder::install_tx();
+        let link = HeldLink::new();
+        let (manager, transport) =
+            transport_over(100, link.clone(), Duration::from_millis(400)).await;
+        let peer = transport.get_zid().unwrap();
+        wait_until("the link writes a keep-alive", || {
+            matches!(link.holding(), Some(TransportBody::KeepAlive(_)))
+        })
+        .await;
+        transport.close().await.unwrap();
+        assert!(matches!(link.cut()[..], [TransportBody::KeepAlive(_)]));
+        assert_eq!(link.begun_after_cut(), 0);
+        assert_eq!(recorder::tx_losses_to(peer), []);
+        manager.close().await;
+    }
 }

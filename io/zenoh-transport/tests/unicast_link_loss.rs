@@ -18,6 +18,10 @@
 //! that fails while its transport keeps another link to the peer reports the batches it held
 //! as lost to a live reader, the pushes it refuses as dropped, and the receiver sees the gap.
 //!
+//! Also, what a lease that expires reports, for a receive task held past it and for a transport
+//! with two links, and how a peer that reopens its side of a transport this side still holds is
+//! admitted (BER-2625, BER-2627).
+//!
 //! The loss observers are installed once per process, so each test reads its own peers' only.
 #![cfg(all(feature = "transport_tcp", feature = "transport_multilink"))]
 
@@ -29,7 +33,7 @@ use std::{
     net::{TcpListener, TcpStream},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Mutex, Once,
+        Arc, Condvar, Mutex, Once,
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -42,14 +46,16 @@ use zenoh_core::ztimeout;
 use zenoh_link::{EndPoint, Link};
 use zenoh_protocol::{
     core::{CongestionControl, Priority, WhatAmI, ZenohIdProto},
-    network::{push::ext::QoSType, NetworkBody, NetworkMessage, NetworkMessageMut, Push},
+    network::{
+        push::ext::QoSType, NetworkBody, NetworkBodyMut, NetworkMessage, NetworkMessageMut, Push,
+    },
     transport::{TransportBody, TransportMessage},
     zenoh::PushBody,
 };
 use zenoh_result::ZResult;
 use zenoh_test::get_free_tcp_port;
 use zenoh_transport::{
-    common::loss::{self, RxLoss, RxLossKind, TxLoss, TxLossKind},
+    common::loss::{self, LocalClose, RxLoss, RxLossKind, TxLoss, TxLossKind},
     multicast::TransportMulticast,
     unicast::{TransportManagerBuilderUnicast, TransportUnicast},
     DummyTransportPeerEventHandler, TransportEventHandler, TransportManager,
@@ -346,7 +352,8 @@ fn overfill(transport: &TransportUnicast) {
 }
 
 // Each test's managers have ZenohIds of their own: 20 to 59, 80 to 119, 140 to 141, 210 to
-// 249 and 300 to 339 for the trials, 200 and 201 for the close.
+// 249 and 300 to 339 for the trials, 200 and 201 for the close, and from 400 on for the tests
+// of leases and of reopening.
 
 /// What the tx loss observer saw when a link through the proxy failed: whether the failed
 /// link was listed both before and after a push made right then, which it is when its own
@@ -666,4 +673,415 @@ async fn a_failed_write_counts_the_batch_being_written() {
     let (failure, _) = fail_proxied_link_listed(150, false, Some(1)).await;
     assert_eq!(failure.loss.priority, Priority::Data);
     assert_eq!(failure.loss.kind, TxLossKind::ResetQueued { batches: 1 });
+}
+
+/// Holds whoever waits on it until it is released, for at most [`TIMEOUT`].
+#[derive(Default)]
+struct Gate {
+    released: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl Gate {
+    fn wait(&self) {
+        let released = self.released.lock().unwrap();
+        drop(
+            self.changed
+                .wait_timeout_while(released, TIMEOUT, |released| !*released)
+                .unwrap(),
+        );
+    }
+
+    fn release(&self) {
+        *self.released.lock().unwrap() = true;
+        self.changed.notify_all();
+    }
+}
+
+/// The first payload byte of a message that holds the receive task at [`Marking`].
+const HOLD: u8 = 0xff;
+
+/// Counts the pushes each transport delivers by the byte their payload starts with, and holds
+/// the receive task at a push that starts with [`HOLD`] until `gate` is released.
+#[derive(Clone, Default)]
+struct Marking {
+    delivered: Arc<Mutex<HashMap<u8, usize>>>,
+    gate: Arc<Gate>,
+    held: Arc<AtomicBool>,
+}
+
+impl Marking {
+    fn delivered(&self, marker: u8) -> usize {
+        self.delivered
+            .lock()
+            .unwrap()
+            .get(&marker)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+impl TransportEventHandler for Marking {
+    fn new_unicast(
+        &self,
+        _peer: TransportPeer,
+        _transport: TransportUnicast,
+    ) -> ZResult<Arc<dyn TransportPeerEventHandler>> {
+        Ok(Arc::new(MarkingPeer(self.clone())))
+    }
+
+    fn new_multicast(
+        &self,
+        _transport: TransportMulticast,
+    ) -> ZResult<Arc<dyn TransportMulticastEventHandler>> {
+        panic!("not used")
+    }
+}
+
+struct MarkingPeer(Marking);
+
+impl TransportPeerEventHandler for MarkingPeer {
+    fn handle_message(&self, message: NetworkMessageMut) -> ZResult<()> {
+        let NetworkBodyMut::Push(Push {
+            payload: PushBody::Put(put),
+            ..
+        }) = message.body
+        else {
+            return Ok(());
+        };
+        let marker = put.payload.contiguous().first().copied().unwrap_or(0);
+        if marker == HOLD {
+            self.0.held.store(true, Ordering::SeqCst);
+            self.0.gate.wait();
+        } else {
+            *self.0.delivered.lock().unwrap().entry(marker).or_default() += 1;
+        }
+        Ok(())
+    }
+
+    fn new_link(&self, _link: Link) {}
+    fn del_link(&self, _link: Link) {}
+    fn closed(&self) {}
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// A reliable push that may not be dropped, whose payload starts with `marker`.
+fn marked(marker: u8) -> NetworkMessage {
+    NetworkMessage::from(Push {
+        wire_expr: "test/link_loss".into(),
+        ext_qos: QoSType::new(Priority::Data, CongestionControl::Block, false),
+        ..Push::from(vec![marker; 64])
+    })
+}
+
+/// A manager with ZenohId `n` and `lease`, which negotiates multilink only with `max_links`
+/// above 1.
+fn manager_with(
+    n: u16,
+    handler: Arc<dyn TransportEventHandler>,
+    max_links: usize,
+    lease: Duration,
+) -> TransportManager {
+    TransportManager::builder()
+        .whatami(WhatAmI::Peer)
+        .zid(zid(n))
+        .unicast(
+            TransportManagerBuilderUnicast::default()
+                .max_links(max_links)
+                .lease(lease),
+        )
+        .build_test(handler)
+        .unwrap()
+}
+
+/// A TCP listener added to `manager`, on a free port.
+async fn listen(manager: &TransportManager) -> (EndPoint, u16) {
+    let port = get_free_tcp_port();
+    let endpoint: EndPoint = format!("tcp/127.0.0.1:{port}").parse().unwrap();
+    ztimeout!(manager.add_listener(endpoint.clone())).unwrap();
+    (endpoint, port)
+}
+
+/// The transport `manager` holds with `peer`, once it has one.
+async fn transport_with(manager: &TransportManager, peer: ZenohIdProto) -> TransportUnicast {
+    let start = Instant::now();
+    loop {
+        if let Some(transport) = manager.get_transport_unicast(&peer).await {
+            return transport;
+        }
+        assert!(start.elapsed() < TIMEOUT, "no transport with {peer}");
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// Waits until `manager` holds no transport with `peer`.
+async fn wait_closed(manager: &TransportManager, peer: ZenohIdProto) {
+    let start = Instant::now();
+    while manager.get_transport_unicast(&peer).await.is_some() {
+        assert!(
+            start.elapsed() < TIMEOUT,
+            "the transport with {peer} stayed open"
+        );
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+fn lease_expiries_of(peer: ZenohIdProto) -> usize {
+    rx_losses_from(peer)
+        .iter()
+        .filter(|loss| {
+            loss.kind
+                == RxLossKind::TransportClosedLocally {
+                    reason: LocalClose::LeaseExpired,
+                }
+        })
+        .count()
+}
+
+/// A peer that closes its side of a transport and opens a new one while this side still holds
+/// the old, its receive task held by a callback, is refused until the old one has closed, and
+/// then gets a fresh transport, which delivers every message it is sent. Joined to the old
+/// transport, the new link would meet the old receive SNs, which the peer's new SNs start
+/// below, and its messages would be dropped as old with no report.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_that_reopens_beside_a_held_transport_gets_a_fresh_one() {
+    zenoh_util::init_log_from_env_or("error");
+    install_observers();
+    const BEFORE: usize = 1_000;
+    const AFTER: usize = 200;
+    // Leases long enough that neither side writes to the closed link, which would end the old
+    // transport before the peer reopens.
+    let held = Marking::default();
+    let holding = manager_with(400, Arc::new(held.clone()), 1, Duration::from_secs(60));
+    let sending = manager_with(401, Arc::new(Sender), 1, Duration::from_secs(60));
+    let (holding_endpoint, _) = listen(&holding).await;
+    let (sending_endpoint, _) = listen(&sending).await;
+    // The holding side dials, so that the peer's new link is an inbound one beside it.
+    ztimeout!(holding.open_transport_unicast(sending_endpoint)).unwrap();
+    let old = transport_with(&sending, holding.zid()).await;
+    for _ in 0..BEFORE {
+        assert!(old.schedule(marked(1).as_mut()).unwrap());
+    }
+    wait_until("the first messages are delivered", || {
+        held.delivered(1) == BEFORE
+    });
+    assert!(old.schedule(marked(HOLD).as_mut()).unwrap());
+    wait_until("the receive task is held", || {
+        held.held.load(Ordering::SeqCst)
+    });
+    ztimeout!(old.close()).unwrap();
+
+    let refused = ztimeout!(sending.open_transport_unicast(holding_endpoint.clone()));
+    held.gate.release();
+    let reopened = match &refused {
+        Ok(transport) => transport.clone(),
+        Err(_) => {
+            let start = Instant::now();
+            loop {
+                if let Ok(transport) =
+                    ztimeout!(sending.open_transport_unicast(holding_endpoint.clone()))
+                {
+                    break transport;
+                }
+                assert!(start.elapsed() < TIMEOUT, "the peer never reconnected");
+                tokio::time::sleep(POLL).await;
+            }
+        }
+    };
+    for _ in 0..AFTER {
+        assert!(reopened.schedule(marked(2).as_mut()).unwrap());
+    }
+    let start = Instant::now();
+    while held.delivered(2) < AFTER {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "{} of {AFTER} delivered; reported: {:?}",
+            held.delivered(2),
+            rx_losses_from(sending.zid())
+        );
+        tokio::time::sleep(POLL).await;
+    }
+    assert!(
+        refused.is_err(),
+        "the new link was joined to the old transport"
+    );
+    assert_eq!(rx_losses_from(sending.zid()), []);
+
+    ztimeout!(sending.close());
+    ztimeout!(holding.close());
+}
+
+/// A peer that dials this process while a transport between them stands, opened the other way,
+/// is refused, and the transport keeps one link and carries messages both ways: without
+/// multilink, a link beside another is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dial_beside_a_transport_opened_the_other_way_is_refused() {
+    zenoh_util::init_log_from_env_or("error");
+    install_observers();
+    let a_marks = Marking::default();
+    let b_marks = Marking::default();
+    let a = manager_with(410, Arc::new(a_marks.clone()), 1, Duration::from_secs(10));
+    let b = manager_with(411, Arc::new(b_marks.clone()), 1, Duration::from_secs(10));
+    let (a_endpoint, _) = listen(&a).await;
+    let (b_endpoint, _) = listen(&b).await;
+    let from_a = ztimeout!(a.open_transport_unicast(b_endpoint)).unwrap();
+    let from_b = transport_with(&b, a.zid()).await;
+
+    assert!(ztimeout!(b.open_transport_unicast(a_endpoint)).is_err());
+    assert_eq!(from_a.get_links().unwrap().len(), 1);
+    assert_eq!(from_b.get_links().unwrap().len(), 1);
+    assert!(from_a.schedule(marked(1).as_mut()).unwrap());
+    assert!(from_b.schedule(marked(1).as_mut()).unwrap());
+    wait_until("messages cross both ways", || {
+        a_marks.delivered(1) == 1 && b_marks.delivered(1) == 1
+    });
+
+    ztimeout!(a.close());
+    ztimeout!(b.close());
+}
+
+/// Peers that dial each other at once end up with a transport each, which carries messages
+/// both ways, whichever of their handshakes ends first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn peers_that_dial_each_other_at_once_both_connect() {
+    zenoh_util::init_log_from_env_or("error");
+    install_observers();
+    for trial in 0..20 {
+        let a_marks = Marking::default();
+        let b_marks = Marking::default();
+        let a = manager_with(
+            420 + 2 * trial,
+            Arc::new(a_marks.clone()),
+            1,
+            Duration::from_secs(10),
+        );
+        let b = manager_with(
+            421 + 2 * trial,
+            Arc::new(b_marks.clone()),
+            1,
+            Duration::from_secs(10),
+        );
+        let (a_endpoint, _) = listen(&a).await;
+        let (b_endpoint, _) = listen(&b).await;
+        let _ = tokio::join!(
+            a.open_transport_unicast(b_endpoint),
+            b.open_transport_unicast(a_endpoint)
+        );
+        let from_a = transport_with(&a, b.zid()).await;
+        let from_b = transport_with(&b, a.zid()).await;
+        let start = Instant::now();
+        while a_marks.delivered(1) == 0 || b_marks.delivered(1) == 0 {
+            assert!(
+                start.elapsed() < TIMEOUT,
+                "trial {trial}: a side received nothing"
+            );
+            let _ = from_a.schedule(marked(1).as_mut());
+            let _ = from_b.schedule(marked(1).as_mut());
+            tokio::time::sleep(POLL).await;
+        }
+        ztimeout!(a.close());
+        ztimeout!(b.close());
+    }
+}
+
+/// A short lease, which a hold several times as long outlasts.
+const SHORT_LEASE: Duration = Duration::from_millis(400);
+
+/// A reader whose receive task its own callback holds past the lease reads what waited once
+/// released, and the lease runs again from it. With the peer alive, the reader keeps the
+/// transport, reports no local close, and later messages are delivered; with the peer having
+/// closed the transport meanwhile, the reader sees the close and reports no expired lease.
+/// Each hold lasts three leases, which is the scenario itself rather than a wait for a state;
+/// the trials run one after the other, so that only one receive thread is held at a time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reader_held_past_its_lease_reads_what_waited() {
+    zenoh_util::init_log_from_env_or("error");
+    install_observers();
+    for trial in 0..12 {
+        let peer_closes = trial % 2 == 1;
+        let held = Marking::default();
+        let reading = manager_with(460 + 2 * trial, Arc::new(held.clone()), 1, SHORT_LEASE);
+        let sending = manager_with(461 + 2 * trial, Arc::new(Sender), 1, SHORT_LEASE);
+        let (endpoint, _) = listen(&reading).await;
+        let transport = ztimeout!(sending.open_transport_unicast(endpoint)).unwrap();
+        assert!(transport.schedule(marked(HOLD).as_mut()).unwrap());
+        wait_until("the receive task is held", || {
+            held.held.load(Ordering::SeqCst)
+        });
+        if peer_closes {
+            ztimeout!(transport.close()).unwrap();
+        }
+        tokio::time::sleep(3 * SHORT_LEASE).await;
+        held.gate.release();
+
+        if peer_closes {
+            wait_closed(&reading, sending.zid()).await;
+            assert_eq!(lease_expiries_of(sending.zid()), 0, "trial {trial}");
+        } else {
+            for _ in 0..10 {
+                assert!(transport.schedule(marked(1).as_mut()).unwrap());
+            }
+            let start = Instant::now();
+            while held.delivered(1) < 10 {
+                assert!(
+                    start.elapsed() < Duration::from_secs(5),
+                    "trial {trial}: {} of 10 delivered; reported: {:?}",
+                    held.delivered(1),
+                    rx_losses_from(sending.zid())
+                );
+                tokio::time::sleep(POLL).await;
+            }
+            assert_eq!(rx_losses_from(sending.zid()), [], "trial {trial}");
+            let links = transport_with(&reading, sending.zid())
+                .await
+                .get_links()
+                .unwrap();
+            assert_eq!(links.len(), 1, "trial {trial}");
+        }
+        ztimeout!(sending.close());
+        ztimeout!(reading.close());
+    }
+}
+
+/// A link whose lease expires while its transport keeps another link reports no local close,
+/// and when the other one expires too, the transport reports it once at each end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_the_last_link_to_expire_reports_its_lease() {
+    zenoh_util::init_log_from_env_or("error");
+    install_observers();
+    let reading = manager_with(500, Arc::new(Counting::default()), 2, SHORT_LEASE);
+    let sending = manager_with(501, Arc::new(Sender), 2, SHORT_LEASE);
+    let (_, port) = listen(&reading).await;
+    let proxies = [Proxy::start(port), Proxy::start(port)];
+    for proxy in &proxies {
+        ztimeout!(sending.open_transport_unicast(proxy.endpoint.clone())).unwrap();
+    }
+    let at_reading = transport_with(&reading, sending.zid()).await;
+    let at_sending = transport_with(&sending, reading.zid()).await;
+    let links = |transport: &TransportUnicast| transport.get_links().map_or(0, |l| l.len());
+    wait_until("both links are listed", || {
+        links(&at_reading) == 2 && links(&at_sending) == 2
+    });
+
+    proxies[0].stalled.store(true, Ordering::SeqCst);
+    wait_until("the first link expires at both ends", || {
+        links(&at_reading) == 1 && links(&at_sending) == 1
+    });
+    assert_eq!(lease_expiries_of(sending.zid()), 0);
+    assert_eq!(lease_expiries_of(reading.zid()), 0);
+
+    proxies[1].stalled.store(true, Ordering::SeqCst);
+    wait_closed(&reading, sending.zid()).await;
+    wait_closed(&sending, reading.zid()).await;
+    assert_eq!(lease_expiries_of(sending.zid()), 1);
+    assert_eq!(lease_expiries_of(reading.zid()), 1);
+
+    for proxy in &proxies {
+        proxy.kill();
+    }
+    ztimeout!(sending.close());
+    ztimeout!(reading.close());
 }

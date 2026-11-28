@@ -88,7 +88,7 @@ pub enum RxLossKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LocalClose {
-    /// Nothing arrived from the peer for its lease.
+    /// Nothing arrived from the peer for its lease on the transport's last link.
     LeaseExpired,
     /// A push that may not be dropped found no batch before `wait_before_close`, or did not
     /// fit the link's batches even as fragments.
@@ -197,7 +197,7 @@ pub(crate) mod recorder {
 
     use zenoh_protocol::core::ZenohIdProto;
 
-    use super::RxLoss;
+    use super::{RxLoss, TxLoss};
 
     static LOSSES: Mutex<Vec<RxLoss>> = Mutex::new(Vec::new());
     static PANICKING: Mutex<Vec<ZenohIdProto>> = Mutex::new(Vec::new());
@@ -225,6 +225,28 @@ pub(crate) mod recorder {
     /// The losses recorded from `peer`, in the order they were reported.
     pub(crate) fn losses_from(peer: ZenohIdProto) -> Vec<RxLoss> {
         LOSSES
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|loss| loss.peer == peer)
+            .copied()
+            .collect()
+    }
+
+    static TX_LOSSES: Mutex<Vec<TxLoss>> = Mutex::new(Vec::new());
+
+    /// Installs the recording tx loss observer, once per process.
+    pub(crate) fn install_tx() {
+        static INSTALL: Once = Once::new();
+        INSTALL.call_once(|| {
+            super::set_tx_loss_observer(Box::new(|loss| TX_LOSSES.lock().unwrap().push(*loss)))
+                .unwrap();
+        });
+    }
+
+    /// The tx losses recorded to `peer`, in the order they were reported.
+    pub(crate) fn tx_losses_to(peer: ZenohIdProto) -> Vec<TxLoss> {
+        TX_LOSSES
             .lock()
             .unwrap()
             .iter()
